@@ -1,0 +1,19 @@
+# Neutral JAH config for the distributed image.
+#
+# - decision backend = the built-in rules (no external decision endpoints)
+# - no strong-tier override and no vendor endpoints: routing falls back to the
+#   model list in litellm_config.yaml (decision=rules keeps the cascade logic
+#   and the step logging without calling any outside service)
+#
+# Mount your own config and point LITELLM_JAH_CONFIG at it to customize.
+decision:
+ type: rules
+tau: 0.75
+mode: cascade
+on_error: strong
+first_steps_strong: 1
+verify_finish: true
+strong_label: COMPLEX
+fast_label: SIMPLE
+log_dir: ~/.jah/litellm-logs
+model_name: jah-auto

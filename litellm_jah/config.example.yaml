@@ -1,0 +1,50 @@
+# litellm_jah plugin config. Point LITELLM_JAH_CONFIG at this file (or copy it to ~/.jah/litellm.yaml).
+#
+# The same keys as the standalone proxy's `router:` block (its `fast` key is accepted and ignored).
+
+decision: {type: rules}        # or {type: jev, provider: typesafe} (TYPESAFE_API_KEY) |
+                                # {type: jev, provider: openrouter} (OPENROUTER_API_KEY) |
+                                # {type: jev, provider: local, base_url: http://localhost:8090} | {type: none}
+tau: 0.75                       # escalate to the strong tier when p(hard) >= tau
+first_steps_strong: 1          # the opening step(s) of a session plan the work on the strong tier
+stick_strong: 0                # after an escalation, keep this many further steps on the strong tier
+max_fast_streak: 0             # >0: force a strong step after this many fast steps in a row
+mode: cascade  # cascade | shadow (ask and log, everything strong) | guard (fast writes the step; checked after the call) | off (everything strong)
+on_error: strong # tier when the decision model fails or times out
+decision_timeout_s: 8
+
+# finish check (verify_finish, on by default): a fast-tier final reply (no tool call) is re-run on `strong`.
+# The re-run is a direct litellm SDK call, so `strong` is a model name with credentials available to the
+# SDK (environment, or the keys below). Without `strong` the redo checks are skipped.
+verify_finish: true
+# strong: gemini/gemini-4-5-flash
+# strong_api_key: null # a literal key, or an os.environ/NAME reference read at call time
+# strong_api_base: null
+
+# decision points (tool select, stop, reflection, action) — a preset and/or per-point overrides.
+# preset: route # route (the default) | paper | safe | shadow (log everything, for `jah fit`)
+# decisions:
+#   tool_select: {mode: shadow} # shadow | assist | cascade | guard (+ tau, k, min_tools, max_options, tier, force)
+#   stop: {mode: guard} # strong (the finish check) | guard | shadow | trigger (+ tau, scope: fast|all, submit: [regex])
+#   reflection: {mode: trigger} # trigger | shadow | always (+ tau, every)
+#   action: {mode: guard} # guard | shadow (+ tau, prefilter: risky|command|all, tools/patterns: [regex], on_error)
+
+# classifier plugin (complexity router): the tier labels the classifier returns
+strong_label: COMPLEX
+fast_label: SIMPLE
+
+# routing plugin variant only: the provider/model strings of each tier in the shared model group
+# strong_models: [gemini/gemini-4-argon]
+# fast_models: [gemini/gemini-3.5-flash-lite]
+
+# session store: in-process by default; set type redis for a multi-replica proxy / `litellm --num_workers N`
+# (needs the redis package: `pip install redis` / the `redis` extra)
+# session_store: {type: redis, url: redis://localhost:6379/0}
+# session_store: {type: redis, url: redis://localhost:6379/0, prefix: jah:} # optional key prefix
+max_sessions: 5000         # in-process cache cap (memory store) / local cache cap (redis store)
+session_ttl_s: 3600        # idle TTL (memory store; the Redis blob's EXPIRE, re-anchored on every write)
+
+# logging in the JAH schema: with log_dir set, every routing decision call is appended to <log_dir>/decisions.jsonl
+# (and <log_dir>/steps.jsonl is kept for `jah report`, filled by the jah_step_logger callback). null = no logging.
+log_dir: null            # e.g. ~/.jah/litellm-logs -> then `jah report ~/.jah/litellm-logs`
+model_name: jah-auto     # the model name logged as the step's model_name (group key of `jah report`)

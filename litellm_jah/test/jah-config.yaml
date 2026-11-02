@@ -1,0 +1,26 @@
+# Test plugin config for the deployed proxy.
+# decision: jev = the decision-model-preview model at cn-beijing.maas.qianwenaiapi.com
+# (Jev wire format: POST {base_url}/v1/systemone; the key comes from DASHSCOPE_API_KEY).
+decision:
+  type: jev
+  base_url: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode
+  model: decision-model-preview
+  key_env: DASHSCOPE_API_KEY
+tau: 0.75
+mode: cascade
+on_error: strong
+first_steps_strong: 1
+
+# the finish check: a fast-tier final reply is re-run on the strong model below
+# (explicit api_base because the litellm SDK has no environment variable for this base URL;
+# the key is read from the environment at call time via the os.environ/ reference)
+verify_finish: true
+strong: openai/deepseek-v4.1-flash
+strong_api_base: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1
+strong_api_key: os.environ/DASHSCOPE_API_KEY
+
+strong_label: COMPLEX
+fast_label: SIMPLE
+
+log_dir: ~/.jah/litellm-logs
+model_name: jah-auto

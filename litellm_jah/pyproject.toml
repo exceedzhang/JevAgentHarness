@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "litellm-jah"
+version = "0.1.0"
+description = "JevAgentHarness' decision points as a LiteLLM proxy plugin: a small decision model picks the strong/fast tier per agent step and checks the tool choice, the finish, reflections, and risky actions."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+keywords = ["llm", "agents", "model-routing", "decision-model", "litellm", "proxy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = ["aiohttp>=3.9", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+redis = ["redis>=4.2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["litellm_jah"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["litellm_jah", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]

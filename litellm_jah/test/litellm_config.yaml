@@ -1,0 +1,35 @@
+model_list:
+- model_name: jah-auto
+  litellm_params:
+    model: auto_router/complexity_router
+    complexity_router_config:
+      classifier_type: custom
+      classifier_plugin: litellm_jah.classifier.jah_classifier
+      classifier_plugin_timeout_ms: 9000
+      tiers:
+        COMPLEX: [jah-strong]
+        SIMPLE: [jah-fast]
+      default_model: jah-strong
+      # on classifier error/timeout, route the default model — not the built-in heuristic scorer
+      # (litellm 1.106.x defaults to classifier_fallback: heuristic, which can land a
+      # "simple"-looking prompt on the fast tier and break the strong-on-failure invariant)
+      classifier_fallback: default_model
+- model_name: jah-strong
+  litellm_params:
+    model: openai/deepseek-v4.1-flash
+    api_key: os.environ/DASHSCOPE_API_KEY
+    api_base: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1
+- model_name: jah-fast
+  litellm_params:
+    model: openai/qwen3.8-flash
+    api_key: os.environ/DASHSCOPE_API_KEY
+    api_base: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1
+
+general_settings:
+  master_key: sk-1234 # local test only; never use this in production
+
+litellm_settings:
+  callbacks:
+    - litellm_jah.precall.jah_pre_call
+    - litellm_jah.postcall.jah_post_call
+    - litellm_jah.logger.jah_step_logger

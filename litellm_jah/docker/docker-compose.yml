@@ -1,0 +1,55 @@
+# JAH proxy stack: the litellm-jah image plus a shared Redis session store.
+#
+#   cd litellm_jah/docker
+#   LITELLM_MASTER_KEY=sk-... DASHSCOPE_API_KEY=... OPENAI_API_KEY=... OPENAI_BASE_URL=... \
+#     docker compose up -d --build
+#
+# The variables are read from the environment or a .env file next to this one
+# (compose picks it up automatically). Leave LITELLM_MASTER_KEY empty and the
+# entrypoint generates a random key and prints it to the container logs.
+#
+# The image ships a template model list (jah-strong / jah-fast) and a neutral
+# jah-config.yaml; mount your own over them the way the README's Docker
+# section does when you change the tiers.
+
+services:
+  jah-redis:
+    image: redis:7
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  litellm-jah:
+    build:
+      # the Dockerfile copies litellm_jah/, so the build context is the repository root
+      context: ../..
+      dockerfile: litellm_jah/Dockerfile
+    image: litellm-jah:latest
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+    volumes:
+      # step/decision journals, kept on the host (container path is /root/.jah/...)
+      - ${JAH_LOG_DIR:-$HOME/.jah/litellm-logs}:/root/.jah/litellm-logs
+      # customize the router or the tiers by mounting your own configs:
+      # - ./jah-config.yaml:/app/jah-config.yaml:ro
+      # - ./litellm_config.yaml:/app/litellm_config.yaml:ro
+    command: --config /app/litellm_config.yaml
+    depends_on:
+      jah-redis:
+        condition: service_healthy
+    # to scale: point the JAH session_store at the Redis container, then add more
+    # replicas, e.g. "litellm-jah-2: { extends: litellm-jah, ports: ["4001:4000"] }"
+    # with  session_store: {type: redis, url: redis://jah-redis:6379/0}  in jah-config.yaml
+
+# the explicit name keeps this stack's containers/network apart from any other
+# compose project that happens to live in a directory called "docker"
+name: litellm-jah

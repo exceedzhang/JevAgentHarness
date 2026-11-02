@@ -240,6 +240,13 @@ For litellm-based agents use the model `openai/jah-auto` with `api_base="http://
 More detail for each harness, including the per-session URL form `/s/<session>/v1`, is in
 [docs/harnesses.md](docs/harnesses.md).
 
+### LiteLLM gateway
+
+If your agent runs on a LiteLLM proxy, the routing decision point can run inside LiteLLM instead of in front of
+it: `litellm_jah/` provides the same engine as a LiteLLM routing plugin (a classifier plugin for the complexity
+router, LiteLLM >= 1.99, or a routing plugin, >= 1.94) with the same policy and fail-safe, while LiteLLM handles
+providers, budgets and spend. See [litellm_jah/README.md](litellm_jah/README.md).
+
 ## How routing works
 
 For step *t* of an agent session (the number of model turns already in the request):

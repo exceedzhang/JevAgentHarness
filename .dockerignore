@@ -1,0 +1,11 @@
+# only litellm_jah/ goes into the build context
+.git
+.code-review-graph
+bench
+docs
+paper
+research
+src
+tests
+*.log
+litellm_jah/.venv
