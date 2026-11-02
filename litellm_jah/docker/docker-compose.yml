@@ -34,14 +34,12 @@ services:
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
     volumes:
       # step/decision journals, kept on the host (container path is /root/.jah/...)
       - ${JAH_LOG_DIR:-$HOME/.jah/litellm-logs}:/root/.jah/litellm-logs
       # customize the router or the tiers by mounting your own configs:
       # - ./jah-config.yaml:/app/jah-config.yaml:ro
-      # - ./litellm_config.yaml:/app/litellm_config.yaml:ro
+      - ./litellm_config.yaml:/app/litellm_config.yaml:ro
     command: --config /app/litellm_config.yaml
     depends_on:
       jah-redis:
