@@ -45,7 +45,6 @@ services:
       # the image's neutral jah-config (now carries the strong re-run credentials)
       - ./jah-config.yaml:/app/jah-config.yaml:ro
       # customize the router or the tiers by mounting your own configs:
-      # - ./jah-config.yaml:/app/jah-config.yaml:ro
       - ./litellm_config.yaml:/app/litellm_config.yaml:ro
     command: --config /app/litellm_config.yaml
     depends_on:

@@ -86,11 +86,13 @@ def _num(obj: Any, *names: str) -> int:
 
 
 # the client request parameters the strong re-run may carry (everything else in the source request —
-# litellm internals, the response, timing — is dropped)
+# litellm internals, the response, timing — is dropped). The output budgets (max_tokens /
+# max_completion_tokens) stay out: they belong to the first call, and n/logprobs only inflate the
+# cost of a call that merely judges the first reply.
 _RECALL_PARAMS = frozenset({
-    "temperature", "top_p", "top_logprobs", "max_tokens", "frequency_penalty", "presence_penalty",
-    "seed", "stop", "response_format", "n", "logprobs", "logit_bias", "user", "metadata",
-    "tool_choice", "parallel_tool_calls", "reasoning_effort",
+    "temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop",
+    "response_format", "logit_bias", "user", "metadata", "tool_choice", "parallel_tool_calls",
+    "reasoning_effort",
 })
 
 
@@ -221,13 +223,15 @@ class JahPostCall(CustomLogger):
             return
         tools = request_data.get("tools") or data.get("tools") or []
         kv = current_step.get(None)
-        if kv is not None:
-            # the logging events carry no request metadata: use the identity JAHRouter.decide
-            # recorded for this request (the step logger resolves it the same way)
-            key, step = kv
-        else:
-            key = session_key(messages, metadata)
-            step = step_index(messages)
+        if kv is None:
+            # the logging events carry no request metadata; the identity decide() recorded is the
+            # only reliable key (re-deriving it from the messages silently misses the session id)
+            if os.environ.get("JAH_DEBUG"):
+                import sys
+                print("JAH stream_label: no step identity (current_step unset)", file=sys.stderr,
+                      flush=True)
+            return
+        key, step = kv
         sess = await self.engine.store.get(key)
         rec = sess.decided.get(step)
         if rec is None:
@@ -245,7 +249,7 @@ class JahPostCall(CustomLogger):
             import sys
             print(f"JAH stream_label: step={step} tier={first_tier} final={final} "
                   f"stop={dc.stop.mode} pending={list(sess.pending)}", file=sys.stderr, flush=True)
-        if final and dc.stop.on and dc.stop.mode == "shadow" and \
+        if final and dc.stop.on and dc.stop.mode == "shadow" and step not in sess.step_points and \
                 not (first_tier == "strong" and dc.stop.scope != "all"):
             a = await self.engine.asker.ask(
                 "stop", "shadow", f"{state}\n\nPROPOSED FINAL REPLY: {proposal_text(response)}", STOP,
@@ -255,7 +259,7 @@ class JahPostCall(CustomLogger):
             verdicts.append(_Verdict(True, "finish_check", asks=[a]))
         if verdicts:
             _, v2 = await self._redo(request_data, messages, tools, response, first_tier, verdicts, sess,
-                                     step, state, view)
+                                     step, state, view, look=False)
             if v2 is not None:
                 verdicts.append(v2)
         await settle(self.engine, sess, step, key, response, first_tier, verdicts)
@@ -341,6 +345,7 @@ class JahPostCall(CustomLogger):
     # ------------------------------------------------------------------ the redo
     async def _redo(self, request_data: dict, messages: list[dict], tools: list[Any], first_resp: Any,
                     first_tier: str, redo: list[_Verdict], sess: Any, step: int, state: str, view: Any,
+                    look: bool = True,
                     ) -> tuple[Any, _Verdict | None]:
         cfg = self.engine.cfg
         v2: _Verdict | None = None # the "one more look" verdict, returned so the caller can log its asks
@@ -375,7 +380,7 @@ class JahPostCall(CustomLogger):
         sess.redo_calls[step].append(_call_entry(resp, lat))
         self._label_redo(redo, first_resp, resp, notes, sess)
         # the redo proposes a risky action: one more look (like the standalone proxy)
-        if self.engine.points.action.on and "action_guard" not in reasons and resp_tool_calls(resp):
+        if look and self.engine.points.action.on and "action_guard" not in reasons and resp_tool_calls(resp):
             v2 = await self._action_check(resp, "strong", state, view)
             if v2 is not None and v2.redo:
                 resp2, lat2 = await self._rerun(cfg.strong, with_notes(messages, [v2.note] if v2.note else []),

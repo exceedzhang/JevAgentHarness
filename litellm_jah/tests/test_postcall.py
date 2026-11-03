@@ -689,3 +689,77 @@ def test_stream_label_never_raises(run):
             await engine.close()
 
     run(main())
+
+
+def test_recall_drops_internal_and_output_budget_keys(run, monkeypatch):
+    import litellm
+
+    async def go():
+        seen = {}
+
+        async def fake_acompletion(**kw):
+            seen.update(kw)
+            return resp(model="g-strong")
+
+        monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+        eng = JAHRouter(JAHCfg(strong="g-strong", strong_api_key="sk-strong",
+                               strong_api_base="http://strong.example/v1"))
+        source = {"temperature": 0.2, "tool_choice": "auto", "max_tokens": 999999,
+                  "max_completion_tokens": 5, "n": 2, "logprobs": True, "top_logprobs": 2,
+                  "stream": True, "stream_options": {"include_usage": True}, "start_time": 1.0,
+                  "async_complete_streaming_response": object(),
+                  "api_base": "http://evil.example/v1", "api_key": "sk-client"}
+        await JahPostCall(engine=eng)._recall_default(
+            "g-strong", [{"role": "user", "content": "x"}], [], source)
+        assert seen["temperature"] == 0.2 and seen["tool_choice"] == "auto"
+        for k in ("max_tokens", "max_completion_tokens", "n", "logprobs", "top_logprobs",
+                  "stream", "stream_options", "start_time", "async_complete_streaming_response"):
+            assert k not in seen, k
+        # the re-run keeps the plugin's own credentials, never the client's
+        assert seen["api_key"] == "sk-strong" and seen["api_base"] == "http://strong.example/v1"
+        await eng.close()
+
+    run(go())
+
+
+def test_stream_label_uses_the_recorded_step_without_metadata(run):
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, _ = make_engine({"next_tool": lambda q: answer(q, "bash", 0.9)},
+                                    {"tool_select": {"mode": "shadow"}}, log_dir=tmp)
+            m = msgs(2)
+            await engine.decide(m, {"session_id": "s1"})
+            await JahPreCall(engine=engine).async_pre_call_hook(
+                None, None, rd(m, model="jah-auto"), "completion")
+            # the streaming event's request details carry no metadata: the identity comes from
+            # the current_step the router recorded for this request
+            event = {"model": "openai/jah-strong", "messages": m, "tools": TOOLS, "stream": True}
+            await hook(engine).stream_label(event, resp(tool_calls=[tool()]))
+            rows = [r for r in decision_rows(tmp) if r["point"] == "tool_select"]
+            assert len(rows) == 1 and rows[0]["label"] == "bash"
+            await engine.close()
+
+    run(main())
+
+
+def test_stream_label_does_not_recheck_a_retried_step(run):
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, _ = make_engine({"task_done": lambda q: answer(q, "done", 0.9)},
+                                    {"stop": {"mode": "shadow"}}, log_dir=tmp)
+            m = msgs(2)
+            await engine.decide(m, {"session_id": "s1"})
+            seen = []
+
+            async def recall(model, messages, tools, request_data):
+                seen.append(model)
+                return resp(model="g-strong")
+
+            pc = hook(engine, recall)
+            await pc.stream_label(rd(m), resp())  # settles the step
+            await pc.stream_label(rd(m), resp())  # the client retried the same step
+            assert seen == ["g-strong"]  # one redo, not two
+            assert len([r for r in decision_rows(tmp) if r["point"] == "stop"]) == 1
+            await engine.close()
+
+    run(main())

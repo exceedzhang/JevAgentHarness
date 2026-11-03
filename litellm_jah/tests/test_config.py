@@ -77,3 +77,21 @@ def test_prices_are_parsed():
 def test_invalid_prices_are_rejected(bad):
     with pytest.raises(ValueError):
         JAHCfg.from_dict(bad)
+
+
+def test_currency_defaults_to_usd_and_accepts_an_override():
+    assert JAHCfg().currency == "USD"
+    assert JAHCfg.from_dict({"currency": "CNY"}).currency == "CNY"
+
+
+@pytest.mark.parametrize("bad", [{"currency": ""}, {"currency": 5}])
+def test_invalid_currency_is_rejected(bad):
+    with pytest.raises(ValueError):
+        JAHCfg.from_dict(bad)
+
+
+@pytest.mark.parametrize("spec", [{"input": -1, "output": 2}, {"input": "x", "output": 2},
+                                  {"input": 1, "output": 2, "cached_input": -0.1}])
+def test_non_numeric_or_negative_prices_are_rejected(spec):
+    with pytest.raises(ValueError):
+        JAHCfg.from_dict({"prices": {"a": spec}})

@@ -205,6 +205,7 @@ class JahStepLogger(CustomLogger):
             "llm_cost_usd": round(llm_cost, 8),
             "decision_cost_usd": round(decision_cost, 8),
             "cost_usd": round(llm_cost + decision_cost, 8),
+            "currency": self.engine.cfg.currency,
             "latency_s": round(lat, 3),
             "input_tokens": in_t, "cached_tokens": _num(details, "cached_tokens"), "cache_write_tokens": 0,
             "output_tokens": out_t, "reasoning_tokens": _num(_details(usage, "completion_tokens_details"),
@@ -223,6 +224,7 @@ class JahStepLogger(CustomLogger):
         argument would make litellm treat them as additive to the prompt)."""
         if not model:
             return 0.0, False
+        self.engine.ensure_price(model)
         try:
             from types import SimpleNamespace
 
@@ -233,6 +235,8 @@ class JahStepLogger(CustomLogger):
             if m not in litellm.model_cost: # not in the cost map: log the call as unpriced
                 return 0.0, False
             d = details or {}
+            # cost_per_token reads completion_tokens_details: it must exist or the pricing
+            # raises and the call is logged unpriced
             usage = SimpleNamespace(prompt_tokens=in_t, completion_tokens=out_t,
                                     prompt_tokens_details=SimpleNamespace(
                                         cached_tokens=int(d.get("cached_tokens", 0) or 0),
@@ -242,6 +246,9 @@ class JahStepLogger(CustomLogger):
                 model=m, prompt_tokens=in_t, completion_tokens=out_t, usage_object=usage)
             return float(prompt_c) + float(completion_c), True
         except Exception: # noqa: BLE001 - unknown model or no litellm: log the call as unpriced
+            if os.environ.get("JAH_DEBUG"):
+                import traceback
+                traceback.print_exc()
             return 0.0, False
 
 

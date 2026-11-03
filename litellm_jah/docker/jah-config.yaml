@@ -1,9 +1,6 @@
-# Neutral JAH config for the distributed image.
-#
-# - decision backend = the built-in rules (no external decision endpoints)
-# - no strong-tier override and no vendor endpoints: routing falls back to the
-#   model list in litellm_config.yaml (decision=rules keeps the cascade logic
-#   and the step logging without calling any outside service)
+# JAH config for the distributed image, pre-wired for the demo on the maas endpoints
+# (decision-model-preview, deepseek-v4.1-flash): the vendor URLs and the model names below
+# are examples, not defaults.
 #
 # Mount your own config and point LITELLM_JAH_CONFIG at it to customize.
 decision:
@@ -16,7 +13,6 @@ tau: 0.75
 mode: cascade
 on_error: strong
 first_steps_strong: 1
-verify_finish: true
 strong_label: COMPLEX
 fast_label: SIMPLE
 log_dir: ~/.jah/litellm-logs
@@ -24,8 +20,8 @@ model_name: jah-auto
 # Labelled-decision collection for `jah fit`: shadow mode asks each point and logs the
 # answer next to what the agent actually did, without changing the request. stop:shadow
 # still re-runs a fast final reply on the strong tier (same as verify_finish) - that redo's
-# outcome is the stop label. With the rules backend the shadow questions are free; once a
-# point has >= 30 labelled decisions, `jah fit ~/.jah/litellm-logs` fits its tau.
+ # outcome is the stop label. The decision model's input is free, so collection adds no billed cost.
+# Once a point has >= 30 labelled decisions, `jah fit ~/.jah/litellm-logs` fits its tau.
 decisions:
   tool_select: {mode: shadow}
   stop: {mode: shadow}
@@ -41,6 +37,8 @@ strong_api_base: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1
 # Per-model prices for the step log's cost column, in the billing currency per million
 # tokens (billed in CNY here, so the cost_usd column is CNY). `cached_input` is the cache-hit
 # input price and `cache_write` the explicit cache-creation price (both optional).
+# the billing currency of `prices` and the step log's cost columns
+currency: CNY
 prices:
   deepseek-v4.1-flash: {input: 2, output: 8, cached_input: 0.2}
   qwen3.8-flash: {input: 0.8, output: 2.7, cached_input: 0.1, cache_write: 1.25}

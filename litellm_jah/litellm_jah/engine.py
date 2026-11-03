@@ -68,6 +68,22 @@ class JAHRouter:
             for key in (model, f"openai/{model}"):
                 litellm.model_cost.setdefault(key, {}).update(entry)
 
+    def ensure_price(self, model: str) -> None:
+        """Re-register a configured price when litellm's cost map no longer carries it (a
+        router reload rebuilds the entries): cheap, idempotent, called by the step logger before
+        billing a call."""
+        if not isinstance(model, str) or not model:
+            return
+        bare = model.split("/", 1)[1] if "/" in model else model
+        if not self.cfg.prices or bare not in self.cfg.prices:
+            return
+        try:
+            import litellm
+        except ImportError:
+            return
+        if "input_cost_per_token" not in litellm.model_cost.get(f"openai/{bare}", {}):
+            self._register_prices()
+
     def action_filter(self, cfg: Any) -> ActionFilter:
         flt = self._filters.get(cfg)
         if flt is None:

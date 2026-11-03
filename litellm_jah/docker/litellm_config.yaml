@@ -21,7 +21,7 @@ model_list:
     api_base: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1
     max_tokens: 393216 # model max output 393K (the [1, 393216] cap from maas); default when the client sends none
   # real model limits: with LITELLM_MODIFY_PARAMS=true the proxy clamps a client
-  # max_tokens above 393216 down to it, and validates prompts against the 1M context
+  # max_tokens above 393216 down to it (prompts are never truncated)
   model_info:
     max_input_tokens: 1048576 # context 1M
     max_output_tokens: 393216 # max output 393K
@@ -32,9 +32,9 @@ model_list:
     api_base: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1
     max_tokens: 131072 # model max output 131K (2^17); default when the client sends none
   # real model limits: with LITELLM_MODIFY_PARAMS=true the proxy clamps a client
-  # max_tokens above 131072 down to it, and validates prompts against the 1M context
+  # max_tokens above 131072 down to it (prompts are never truncated)
   model_info:
-    max_input_tokens: 1048576 # context 1M
+    max_input_tokens: 1014784 # vendor max input 991K (991 x 1024); the 1M figure is the context window
     max_output_tokens: 131072 # max output 131K (2^17)
 
 general_settings:

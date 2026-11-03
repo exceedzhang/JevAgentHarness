@@ -19,10 +19,7 @@ tracking, auth and provider handling are LiteLLM's job, not this plugin's.
 
 ```bash
 cd litellm_jah/docker
-LITELLM_MASTER_KEY=sk-... DASHSCOPE_API_KEY=... OPENAI_API_KEY=... OPENAI_BASE_URL=... \
-  docker compose up -d --build
-  
-LITELLM_MASTER_KEY=REDACTED_MASTER_KEY DASHSCOPE_API_KEY=REDACTED_DASHSCOPE_KEY docker compose up -d
+LITELLM_MASTER_KEY=sk-... DASHSCOPE_API_KEY=... docker compose up -d --build
 ```
 
 Credentials are read from the environment or a `.env` file next to the compose file; an empty
