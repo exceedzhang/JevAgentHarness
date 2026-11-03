@@ -9,6 +9,7 @@ decision:
  model: decision-model-preview # Jev decision model on the maas (free input, 65K context)
  base_url: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode # the backend appends /v1/systemone
  key_env: DASHSCOPE_API_KEY
+ price_per_m: 0 # the decision model's input is free; the built-in fallback rate is USD-based
 tau: 0.75
 mode: cascade
 on_error: strong

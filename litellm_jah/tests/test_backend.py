@@ -111,3 +111,18 @@ def test_jev_backend_rejects_an_empty_distribution(run):
             await be.close()
             await server.close()
     run(go())
+
+
+def test_jev_price_per_m_overrides_the_fallback():
+    assert JevBackend(price_per_m=0).price_per_m == 0.0
+    assert JevBackend(price_per_m=2).price_per_m == 2.0
+    assert JevBackend().price_per_m > 0  # the built-in fallback
+    for bad in (-1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            JevBackend(price_per_m=bad)
+
+
+def test_make_backend_passes_the_price():
+    from litellm_jah.backend import make_backend
+
+    assert make_backend({"type": "jev", "price_per_m": 0}).price_per_m == 0.0

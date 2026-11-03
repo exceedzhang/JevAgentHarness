@@ -8,6 +8,7 @@ A file shaped like the standalone proxy's config works: a top-level ``router:`` 
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -145,7 +146,7 @@ class JAHCfg:
                 v = spec.get(k)
                 if v is None:
                     continue
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
                     raise ValueError(f"prices[{m!r}][{k}]: expected a non-negative number")
 
     @classmethod

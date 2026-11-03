@@ -623,6 +623,7 @@ def test_stream_final_answer_gets_the_shadow_redo_label(run):
             rows = [r for r in decision_rows(tmp) if r["point"] == "stop"]
             assert len(rows) == 1 and rows[0]["mode"] == "shadow" and rows[0]["label"] == "not_done"
             assert rows[0]["fit_ok"] is True and rows[0]["label_tier"] == "strong"
+            assert rows[0]["currency"] == "USD"  # the log is currency-tagged
             await engine.close()
 
     run(main())

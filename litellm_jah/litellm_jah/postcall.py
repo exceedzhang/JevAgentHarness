@@ -488,7 +488,8 @@ async def settle(engine: JAHRouter, sess: Any, step: int, key: str, first_resp: 
     if engine.journal is not None and all_asks:
         for a in all_asks:
             try:
-                await engine.journal.decision({**head(key, engine.cfg.model_name, step), **a.record()})
+                await engine.journal.decision({**head(key, engine.cfg.model_name, step), **a.record(),
+                                              "currency": engine.cfg.currency})
             except Exception: # noqa: BLE001 - logging must never break the request
                 pass
     sess.step_points[step] = {"cost_usd": sum(a.cost_usd for a in all_asks), "n_asks": len(all_asks)}

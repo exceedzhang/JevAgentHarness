@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import time
@@ -82,7 +83,12 @@ class JevBackend(DecisionBackend):
     name = "jev"
 
     def __init__(self, provider: str = "openrouter", model: str | None = None, base_url: str | None = None,
-                 key_env: str | None = None, timeout_s: float = 8.0, retries: int = 2) -> None:
+                 key_env: str | None = None, timeout_s: float = 8.0, retries: int = 2,
+                 price_per_m: float | None = None) -> None:
+        price = JEV_PRICE_PER_M_INPUT if price_per_m is None else float(price_per_m)
+        if not math.isfinite(price) or price < 0:
+            raise ValueError("price_per_m must be a non-negative finite number")
+        self.price_per_m = price
         pre = PROVIDERS.get(provider, PROVIDERS["openrouter"])
         self.provider = provider
         self.model = model or pre["model"]
@@ -140,7 +146,7 @@ class JevBackend(DecisionBackend):
         p = {k: v / s for k, v in p.items()}
         u = data.get("usage") or {}
         tokens = int(u.get("input_tokens") or 0)
-        cost = float(u["cost"]) if isinstance(u.get("cost"), (int, float)) else tokens * JEV_PRICE_PER_M_INPUT / 1e6
+        cost = float(u["cost"]) if isinstance(u.get("cost"), (int, float)) else tokens * self.price_per_m / 1e6
         return Decision(p=p, model=str(data.get("model") or self.model), cost_usd=cost, latency_s=latency,
                         input_tokens=tokens)
 
@@ -221,7 +227,8 @@ def make_backend(spec: Mapping[str, Any] | None) -> DecisionBackend:
     spec = dict(spec or {})
     kind = spec.pop("type", "rules")
     if kind == "jev":
-        allowed = {"provider", "model", "base_url", "key_env", "timeout_s", "retries"}
+        allowed = {"provider", "model", "base_url", "key_env", "timeout_s", "retries",
+                   "price_per_m"}
         unknown = set(spec) - allowed
         if unknown:
             raise ValueError(f"unknown decision backend options {sorted(unknown)}; allowed: {sorted(allowed)}")

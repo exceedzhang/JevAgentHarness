@@ -339,6 +339,29 @@ configured one.
 - Unpriced models (not in LiteLLM's cost map) are logged with `priced: false` and counted in
   `unpriced_calls`, like the standalone proxy.
 
+### Prices and currency
+
+The cost columns in the journals are only meaningful when LiteLLM knows what a model costs. Set a
+`prices` block in the JAH config:
+
+```yaml
+# the billing currency of the prices and of every cost column in the journals
+currency: CNY
+prices:
+  deepseek-v4.1-flash: {input: 2, output: 8, cached_input: 0.2}
+  qwen3.8-flash: {input: 0.8, output: 2.7, cached_input: 0.1, cache_write: 1.25}
+```
+
+Values are **per million tokens in `currency`** (`currency` defaults to `USD`). `input` and `output`
+are required; `cached_input` is the cache-hit price and `cache_write` the explicit cache-creation
+price. The plugin registers each entry in LiteLLM's cost map (bare name and `openai/`-prefixed), so
+cached tokens are billed at the cache price. A model without an entry is logged with
+`priced: false` and `cost_usd: 0`; `jah report` counts those in `unpriced_calls`.
+
+Decision-model calls are estimated from their input tokens at `decision.price_per_m` (per million,
+same currency; default `0.10`). Set it to `0` when the decision model is free (e.g. the maas
+`decision-model-preview`), so decision costs cannot mix currencies with the step costs.
+
 ## Tests
 
 ```bash
