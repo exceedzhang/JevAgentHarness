@@ -764,3 +764,25 @@ def test_stream_label_does_not_recheck_a_retried_step(run):
             await engine.close()
 
     run(main())
+
+
+def test_a_reasked_step_writes_one_decision_row(run):
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, _ = make_engine({"next_tool": lambda q: answer(q, "bash", 0.9)},
+                                    {"tool_select": {"mode": "shadow"}}, log_dir=tmp)
+            m = msgs(2)
+            await engine.decide(m, {"session_id": "s1"})
+            pre = JahPreCall(engine=engine)
+            pc = hook(engine)
+            await pre.async_pre_call_hook(None, None, rd(m, model="jah-auto"), "completion")
+            await pc.stream_label(rd(m), resp(tool_calls=[tool()]))
+            sess = await engine.store.get("s1")
+            sess.plan.clear()  # the retry no longer sees the first attempt's plan
+            await pre.async_pre_call_hook(None, None, rd(m, model="jah-auto"), "completion")
+            await pc.stream_label(rd(m), resp(tool_calls=[tool()]))
+            rows = [r for r in decision_rows(tmp) if r["point"] == "tool_select"]
+            assert len(rows) == 1  # one step, one sample for `jah fit`
+            await engine.close()
+
+    run(main())

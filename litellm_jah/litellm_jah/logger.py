@@ -80,6 +80,12 @@ class JahStepLogger(CustomLogger):
     async def async_log_stream_event(self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any) -> None:
         # streamed completions never reach the success event (the base class no-ops stream events),
         # so the step row and the pre-call settle happen here
+        if os.environ.get("JAH_DEBUG"):
+            import sys
+            import time
+            print(f"JAH logger: stream event t={time.monotonic() % 1000:.1f} "
+                  f"model={kwargs.get('model')} nmsg={len(kwargs.get('messages') or [])} "
+                  f"in_check={in_check.get(False)}", file=sys.stderr, flush=True)
         try:
             await self._log(kwargs, response_obj, start_time, end_time, error=None)
         except Exception: # noqa: BLE001 - logging must never break the request
@@ -101,13 +107,19 @@ class JahStepLogger(CustomLogger):
                         await settle(self.engine, sess, step, key, None,
                                      rec.get("tier") if rec else None, [])
         except Exception: # noqa: BLE001
-            pass
+            if os.environ.get("JAH_DEBUG"):
+                import traceback
+                traceback.print_exc()
 
     @staticmethod
     def _route_id(kwargs: dict) -> tuple[str, int] | None:
         """The (session, step) this event belongs to, if the plugin routed it. Prefers the identity
         ``JAHRouter.decide`` recorded in the request context (the logging event's kwargs carry no request
-        metadata); falls back to recomputing it from the messages."""
+        metadata); falls back to recomputing it from the messages.
+
+        The fallback is safe here and only here: the logger writes rows and never changes session
+        state, so recording a step it cannot map exactly beats dropping the row. ``stream_label``
+        must not fall back: there the identity decides whether a strong re-run runs."""
         kv = current_step.get(None)
         if kv is not None:
             return kv

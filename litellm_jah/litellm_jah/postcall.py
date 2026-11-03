@@ -485,14 +485,20 @@ async def settle(engine: JAHRouter, sess: Any, step: int, key: str, first_resp: 
             asks[id(a)] = a
     sess.pending = {}
     all_asks = list(asks.values())
+    # a client retry may ask the same question for the same step again: `jah fit` treats one step
+    # as one sample, so only the first settle of a question writes its row
+    settled = set((sess.step_points.get(step) or {}).get("questions") or [])
     if engine.journal is not None and all_asks:
         for a in all_asks:
+            if a.question in settled:
+                continue
             try:
                 await engine.journal.decision({**head(key, engine.cfg.model_name, step), **a.record(),
                                               "currency": engine.cfg.currency})
             except Exception: # noqa: BLE001 - logging must never break the request
                 pass
-    sess.step_points[step] = {"cost_usd": sum(a.cost_usd for a in all_asks), "n_asks": len(all_asks)}
+    sess.step_points[step] = {"cost_usd": sum(a.cost_usd for a in all_asks), "n_asks": len(all_asks),
+                              "questions": sorted(settled | {a.question for a in all_asks})}
     for old in [s for s in sess.step_points if s < step - 4]:
         sess.step_points.pop(old, None)
     for old in [s for s in sess.decided if s < step - 4]:
