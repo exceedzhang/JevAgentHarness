@@ -575,3 +575,117 @@ def test_other_model_groups_skip_the_checks(run):
             await engine.close()
 
     run(main())
+
+
+def test_stream_label_labels_the_tool_select_ask_without_a_redo(run):
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, backend = make_engine(
+                {"next_tool": lambda q: answer(q, "bash", 0.9)},
+                {"tool_select": {"mode": "shadow"}}, log_dir=tmp)
+            m = msgs(2)
+            await engine.decide(m, {"session_id": "s1"})
+            pre = JahPreCall(engine=engine)
+            await pre.async_pre_call_hook(None, None, rd(m, model="jah-auto"), "completion")
+            seen = []
+
+            async def recall(model, messages, tools, request_data):
+                seen.append(model)
+                return resp(tool_calls=[tool()], model="g-strong")
+
+            # the step called a tool: not a final answer, so the tool ask is labelled but no redo runs
+            await hook(engine, recall).stream_label(rd(m), resp(tool_calls=[tool()]))
+            assert not seen
+            rows = [r for r in decision_rows(tmp) if r["point"] == "tool_select"]
+            assert len(rows) == 1 and rows[0]["label"] == "bash" and rows[0]["fit_ok"] is True
+            await engine.close()
+
+    run(main())
+
+
+def test_stream_final_answer_gets_the_shadow_redo_label(run):
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, backend = make_engine(
+                {"task_done": lambda q: answer(q, "done", 0.9)},
+                {"stop": {"mode": "shadow"}}, log_dir=tmp)
+            m = msgs(2)
+            await engine.decide(m, {"session_id": "s1"})
+            seen = []
+
+            async def recall(model, messages, tools, request_data):
+                seen.append(model)
+                # the strong redo keeps working: the streamed final answer was not done
+                return resp(tool_calls=[tool()], model="g-strong", in_t=110, out_t=30)
+
+            await hook(engine, recall).stream_label(rd(m), resp())  # a final answer (no tool call)
+            assert seen == ["g-strong"]  # the redo runs even though the reply was already delivered
+            rows = [r for r in decision_rows(tmp) if r["point"] == "stop"]
+            assert len(rows) == 1 and rows[0]["mode"] == "shadow" and rows[0]["label"] == "not_done"
+            assert rows[0]["fit_ok"] is True and rows[0]["label_tier"] == "strong"
+            await engine.close()
+
+    run(main())
+
+
+def test_stream_final_answer_is_done_when_the_redo_stops(run):
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, backend = make_engine(
+                {"task_done": lambda q: answer(q, "done", 0.9)},
+                {"stop": {"mode": "shadow"}}, log_dir=tmp)
+            m = msgs(2)
+            await engine.decide(m, {"session_id": "s1"})
+
+            async def recall(model, messages, tools, request_data):
+                return resp(model="g-strong")  # the strong redo also ends the turn
+
+            await hook(engine, recall).stream_label(rd(m), resp())
+            rows = [r for r in decision_rows(tmp) if r["point"] == "stop"]
+            assert len(rows) == 1 and rows[0]["label"] == "done" and rows[0]["fit_ok"] is True
+            await engine.close()
+
+    run(main())
+
+
+def test_stream_label_skips_the_stop_check_on_the_strong_tier(run):
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, backend = make_engine({}, {"stop": {"mode": "shadow"}}, p_hard=1.0, log_dir=tmp)
+            m = msgs(2)
+            await engine.decide(m, {"session_id": "s1"})
+            sess = await engine.store.get("s1")
+            assert sess.decided[2]["tier"] == "strong"  # the hard step
+            seen = []
+
+            async def recall(model, messages, tools, request_data):
+                seen.append(model)
+                return resp(model="g-strong")
+
+            await hook(engine, recall).stream_label(rd(m), resp())
+            assert not seen  # a strong-tier final answer is not re-checked (the default scope)
+            assert [r for r in decision_rows(tmp) if r["point"] == "stop"] == []
+            await engine.close()
+
+    run(main())
+
+
+def test_stream_label_never_raises(run):
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, backend = make_engine(
+                {"task_done": lambda q: answer(q, "done", 0.9)},
+                {"stop": {"mode": "shadow"}}, log_dir=tmp)
+            m = msgs(2)
+            await engine.decide(m, {"session_id": "s1"})
+
+            async def recall(model, messages, tools, request_data):
+                raise RuntimeError("boom")
+
+            # a failed redo is a fail-safe, not an error: the row is still written, unlabelled
+            await hook(engine, recall).stream_label(rd(m), resp())
+            rows = [r for r in decision_rows(tmp) if r["point"] == "stop"]
+            assert len(rows) == 1 and rows[0]["effect"] == "error_kept" and rows[0]["label"] is None
+            await engine.close()
+
+    run(main())

@@ -64,3 +64,16 @@ def test_decisions_can_override_the_routing_mode():
     c = JAHCfg.from_dict({"decisions": {"routing": {"mode": "guard"}}})
     assert c.mode == "cascade"  # the top-level default stands
     assert c.points.routing.mode == "guard"  # the override reaches the resolved point
+
+
+def test_prices_are_parsed():
+    c = JAHCfg.from_dict({"prices": {"a": {"input": 1, "output": 2},
+                                     "b": {"input": 0.5, "output": 1, "cached_input": 0.05}}})
+    assert c.prices["a"] == {"input": 1, "output": 2}
+    assert c.prices["b"]["cached_input"] == 0.05
+
+
+@pytest.mark.parametrize("bad", [{"prices": {"a": {}}}, {"prices": {"a": 5}}, {"prices": "nope"}])
+def test_invalid_prices_are_rejected(bad):
+    with pytest.raises(ValueError):
+        JAHCfg.from_dict(bad)

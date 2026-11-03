@@ -19,11 +19,23 @@ model_list:
     model: openai/deepseek-v4.1-flash
     api_key: os.environ/DASHSCOPE_API_KEY
     api_base: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1
+    max_tokens: 393216 # model max output 393K (the [1, 393216] cap from maas); default when the client sends none
+  # real model limits: with LITELLM_MODIFY_PARAMS=true the proxy clamps a client
+  # max_tokens above 393216 down to it, and validates prompts against the 1M context
+  model_info:
+    max_input_tokens: 1048576 # context 1M
+    max_output_tokens: 393216 # max output 393K
 - model_name: jah-fast
   litellm_params:
-    model: openai/Qwen/Qwen3.6-27B-FP8
-    api_key: os.environ/OPENAI_API_KEY
-    api_base: os.environ/OPENAI_BASE_URL
+    model: openai/qwen3.8-flash
+    api_key: os.environ/DASHSCOPE_API_KEY
+    api_base: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1
+    max_tokens: 131072 # model max output 131K (2^17); default when the client sends none
+  # real model limits: with LITELLM_MODIFY_PARAMS=true the proxy clamps a client
+  # max_tokens above 131072 down to it, and validates prompts against the 1M context
+  model_info:
+    max_input_tokens: 1048576 # context 1M
+    max_output_tokens: 131072 # max output 131K (2^17)
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY  # generated at startup if unset (see docker/jah_entrypoint.sh)

@@ -17,7 +17,7 @@ from typing import Any
 from .context import current_step, in_check
 from .engine import JAHRouter
 from .journal import Journal, head
-from .postcall import settle
+from .postcall import JahPostCall, settle
 from .state import session_key, step_index
 
 try:
@@ -61,6 +61,7 @@ class JahStepLogger(CustomLogger):
             self.engine.cfg.log_dir = log_dir
             self.engine.journal = Journal(log_dir)
         self.journal = self.engine.journal
+        self._postcall = JahPostCall(engine=self.engine)
 
     async def async_log_success_event(self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any) -> None:
         if os.environ.get("JAH_DEBUG"):
@@ -145,11 +146,16 @@ class JahStepLogger(CustomLogger):
             return # not a step this plugin routed
         data = kwargs.get("data") or {}
         if error is None and (kwargs.get("stream") or data.get("stream")):
-            # the post-call hook skips streams (no reply in hand): settle the pre-call asks here,
-            # where the stream event carries the step identity (real events flag stream at the top
-            # level; data["stream"] is a legacy shape). error is None: the failure path settles on
-            # its own, and a second settle would clobber the step point counts
-            await settle(self.engine, sess, step, key, None, rec.get("tier"), [])
+            # the post-call hook skips streams (no reply in hand): the label-only stream check settles
+            # the pre-call asks against the complete reply, and for a fast final answer under stop:
+            # shadow it runs the shadow redo for its label (the streamed reply is never replaced).
+            # error is None: the failure path settles on its own, and a second settle would clobber
+            # the step point counts
+            if dbg:
+                import sys
+                print("JAH logger: stream gate -> stream_label", file=sys.stderr, flush=True)
+            await self._postcall.stream_label(kwargs, response_obj)
+            rec = sess.decided.get(step) or rec  # a shadow redo may have escalated the step's tier
         if dbg:
             import sys
             print(f"JAH logger: writing key={key} step={step} tier={rec.get('tier')}", file=sys.stderr)
@@ -175,13 +181,16 @@ class JahStepLogger(CustomLogger):
                 # the event span, which on litellm 1.106.x covers the first call only - the deployment hook (the
                 # checks and the re-run) runs after the success event's end_time, so the re-run is counted once
                 c_lat = fast_lat if c.get("latency_s") is None else float(c.get("latency_s") or 0.0)
-                cost, priced = self._cost(c.get("model"), c.get("in", 0), c.get("out", 0))
+                cost, priced = self._cost(c.get("model"), c.get("in", 0), c.get("out", 0),
+                                      {"cached_tokens": c.get("cached", 0)})
                 calls.append({"tier": c.get("tier"), "model": c.get("model"), "latency_s": round(c_lat, 3),
                               "attempts": 1, "cost_usd": round(cost, 8), "priced": priced})
                 llm_cost += cost
                 lat += c_lat
         else:
-            llm_cost, priced = self._cost(model, in_t, out_t)
+            llm_cost, priced = self._cost(
+            model, in_t, out_t, {"cached_tokens": _num(details, "cached_tokens"),
+                                 "cache_write_tokens": _num(details, "cache_write_tokens")})
             calls = [{"tier": rec.get("tier"), "model": model, "latency_s": fast_lat, "attempts": 1,
                       "cost_usd": round(llm_cost, 8), "priced": priced}]
             lat = fast_lat
@@ -206,12 +215,35 @@ class JahStepLogger(CustomLogger):
             row["error"] = error
         await self.journal.step(row)
 
-    def _cost(self, model: str | None, in_t: int, out_t: int) -> tuple[float, bool]:
-        try:
-            from litellm import cost as litellm_cost
-            return float(litellm_cost(model=model, prompt_tokens=in_t, completion_tokens=out_t) or 0.0), True
-        except Exception:  # noqa: BLE001 - unknown model or no litellm: log the call as unpriced
+    def _cost(self, model: str | None, in_t: int, out_t: int,
+              details: dict[str, Any] | None = None) -> tuple[float, bool]:
+        """One call via litellm's cost map (the router registers each deployment's model_info and
+        the engine the config's ``prices``). OpenAI usage shape: ``prompt_tokens`` already includes
+        the cached tokens, so they go in via ``usage_object`` (an explicit ``cache_read_input_tokens``
+        argument would make litellm treat them as additive to the prompt)."""
+        if not model:
             return 0.0, False
+        try:
+            from types import SimpleNamespace
+
+            import litellm
+            # the provider-prefixed key first: cost_per_token infers the provider from the name,
+            # which raises for an unknown bare name even when the bare key is registered
+            m = f"openai/{model}" if f"openai/{model}" in litellm.model_cost else model
+            if m not in litellm.model_cost: # not in the cost map: log the call as unpriced
+                return 0.0, False
+            d = details or {}
+            usage = SimpleNamespace(prompt_tokens=in_t, completion_tokens=out_t,
+                                    prompt_tokens_details=SimpleNamespace(
+                                        cached_tokens=int(d.get("cached_tokens", 0) or 0),
+                                        cache_write_tokens=int(d.get("cache_write_tokens", 0) or 0)),
+                                    completion_tokens_details=SimpleNamespace(reasoning_tokens=0))
+            prompt_c, completion_c = litellm.cost_per_token(
+                model=m, prompt_tokens=in_t, completion_tokens=out_t, usage_object=usage)
+            return float(prompt_c) + float(completion_c), True
+        except Exception: # noqa: BLE001 - unknown model or no litellm: log the call as unpriced
+            return 0.0, False
+
 
     @staticmethod
     def _tool_calls(response_obj: Any) -> int:

@@ -46,6 +46,27 @@ class JAHRouter:
         self.asker = Asker(self.backend)
         self.points = self.cfg.points
         self._filters: dict[Any, ActionFilter] = {}
+        if self.cfg.prices:
+            self._register_prices()
+
+    def _register_prices(self) -> None:
+        """The config's per-model prices (``prices``: currency per million tokens) into litellm's
+        cost map, so the step logger can bill calls: both the bare model name (what the serving
+        endpoint returns) and the provider-prefixed key are registered; existing entries (the
+        router's model_info limits) are extended, not replaced."""
+        try:
+            import litellm
+        except ImportError:
+            return # no litellm: the calls are logged as unpriced
+        for model, spec in self.cfg.prices.items():
+            entry = {}
+            for src, dst in (("input", "input_cost_per_token"), ("output", "output_cost_per_token"),
+                             ("cached_input", "cache_read_input_token_cost"),
+                             ("cache_write", "cache_creation_input_token_cost")):
+                if src in spec:
+                    entry[dst] = float(spec[src]) / 1_000_000
+            for key in (model, f"openai/{model}"):
+                litellm.model_cost.setdefault(key, {}).update(entry)
 
     def action_filter(self, cfg: Any) -> ActionFilter:
         flt = self._filters.get(cfg)

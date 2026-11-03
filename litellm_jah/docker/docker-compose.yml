@@ -34,9 +34,16 @@ services:
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      # clamp a client max_tokens above the model's max output (see model_info
+      # max_output_tokens in litellm_config.yaml) instead of forwarding it upstream
+      LITELLM_MODIFY_PARAMS: "true"
+      # set JAH_DEBUG=1 in the shell (or .env) to trace the hooks' internal paths in the logs
+      JAH_DEBUG: ${JAH_DEBUG:-}
     volumes:
       # step/decision journals, kept on the host (container path is /root/.jah/...)
       - ${JAH_LOG_DIR:-$HOME/.jah/litellm-logs}:/root/.jah/litellm-logs
+      # the image's neutral jah-config (now carries the strong re-run credentials)
+      - ./jah-config.yaml:/app/jah-config.yaml:ro
       # customize the router or the tiers by mounting your own configs:
       # - ./jah-config.yaml:/app/jah-config.yaml:ro
       - ./litellm_config.yaml:/app/litellm_config.yaml:ro

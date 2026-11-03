@@ -74,7 +74,8 @@ def test_fast_final_reply_is_redone_on_strong(run):
         assert rec["tier"] == "strong" and rec["reason"] == "finish_check"
         assert sess.fast_streak == 0 and sess.last_tier == "strong"
         calls = sess.redo_calls[2]
-        assert calls[0]["tier"] == "fast" and calls[0]["model"] == "g-fast"
+        # the first call records the request's model (the deployment's), not the response's echo
+        assert calls[0]["tier"] == "fast" and calls[0]["model"] == "jah-auto"
         assert calls[0]["in"] == 100 and calls[0]["out"] == 20 and calls[0]["latency_s"] is None
         assert calls[1]["tier"] == "strong" and calls[1]["model"] == "g-strong"
         assert calls[1]["latency_s"] >= 0.0
@@ -226,7 +227,8 @@ def test_step_row_records_both_calls(run):
             row = rows[0]
             assert row["tier"] == "strong" and row["reason"] == "finish_check"
             assert [c["tier"] for c in row["calls"]] == ["fast", "strong"]
-            assert row["calls"][0]["model"] == "g-fast" and row["calls"][1]["model"] == "g-strong"
+            # the first call records the request's model (the test's request says "jah-auto")
+            assert row["calls"][0]["model"] == "jah-auto" and row["calls"][1]["model"] == "g-strong"
             assert row["latency_s"] == 1.0 + row["calls"][1]["latency_s"]
             assert row["n_tool_calls"] == 1 and row["finish"] == "tool_calls"
             assert row["input_tokens"] == 110 and row["output_tokens"] == 30

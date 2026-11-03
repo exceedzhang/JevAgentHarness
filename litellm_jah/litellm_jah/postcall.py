@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .context import in_check
+from .context import current_step, in_check
 from .engine import JAHRouter
 from .journal import head
 from .points import (
@@ -85,11 +85,22 @@ def _num(obj: Any, *names: str) -> int:
     return 0
 
 
+# the client request parameters the strong re-run may carry (everything else in the source request —
+# litellm internals, the response, timing — is dropped)
+_RECALL_PARAMS = frozenset({
+    "temperature", "top_p", "top_logprobs", "max_tokens", "frequency_penalty", "presence_penalty",
+    "seed", "stop", "response_format", "n", "logprobs", "logit_bias", "user", "metadata",
+    "tool_choice", "parallel_tool_calls", "reasoning_effort",
+})
+
+
 def _call_entry(resp: Any, latency_s: float) -> dict[str, Any]:
     """One re-run call, for the step row's ``calls`` list (the first call's latency comes from the logger)."""
+    usage = getattr(resp, "usage", None)
     return {"tier": "strong", "model": getattr(resp, "model", None),
-            "in": _num(getattr(resp, "usage", None), "prompt_tokens"),
-            "out": _num(getattr(resp, "usage", None), "completion_tokens"),
+            "in": _num(usage, "prompt_tokens"),
+            "out": _num(usage, "completion_tokens"),
+            "cached": _num(getattr(usage, "prompt_tokens_details", None), "cached_tokens"),
             "latency_s": latency_s}
 
 
@@ -176,6 +187,78 @@ class JahPostCall(CustomLogger):
             verdicts.append(v2) # the "one more look" asks are logged too (the standalone merges them the same way)
         await settle(self.engine, sess, step, key, response, first_tier, verdicts)
         return result if result is not response else None
+    # ------------------------------------------------------------------ the streamed reply
+    async def stream_label(self, request_data: dict, response: Any) -> None:
+        """The label-only twin of ``_check`` for streamed steps: the reply was already delivered, so nothing
+        may change it - but the final stream event carries the complete reply in hand, so label what the
+        post-call hook would have labelled. The pre-call asks settle against this reply (tool select gets
+        its label), and a fast-tier final answer under ``stop: shadow`` runs the shadow check: the
+        decision-model question plus the strong redo that supplies the ``jah fit`` label (the redo's reply
+        is discarded). Any other stop mode can only act by replacing the reply, which a stream cannot do,
+        so it is skipped. Never raises: this runs on a request that has already succeeded."""
+        try:
+            await self._stream_label(request_data, response)
+        except Exception: # noqa: BLE001 - labelling must never break a completed request
+            if os.environ.get("JAH_DEBUG"):
+                import traceback
+                traceback.print_exc()
+
+    async def _stream_label(self, request_data: dict, response: Any) -> None:
+        if os.environ.get("JAH_DEBUG"):
+            import sys
+            print(f"JAH stream_label: in_check={in_check.get(False)} resp={type(response).__name__} "
+                  f"model={request_data.get('model')} nmsg={len(request_data.get('messages') or [])} "
+                  f"meta={request_data.get('metadata')} keys={sorted(request_data)}", file=sys.stderr, flush=True)
+        if in_check.get(False) or response is None:
+            return
+        data = request_data.get("data") or {}
+        messages = request_data.get("messages") or data.get("messages") or []
+        if not messages:
+            return
+        metadata = request_data.get("metadata") or data.get("metadata") or {}
+        group = str(metadata.get("model_group") or data.get("model") or "")
+        if group and group != self.engine.cfg.model_name:
+            return
+        tools = request_data.get("tools") or data.get("tools") or []
+        kv = current_step.get(None)
+        if kv is not None:
+            # the logging events carry no request metadata: use the identity JAHRouter.decide
+            # recorded for this request (the step logger resolves it the same way)
+            key, step = kv
+        else:
+            key = session_key(messages, metadata)
+            step = step_index(messages)
+        sess = await self.engine.store.get(key)
+        rec = sess.decided.get(step)
+        if rec is None:
+            if os.environ.get("JAH_DEBUG"):
+                import sys
+                print(f"JAH stream_label: no record key={key} step={step} decided={list(sess.decided)}",
+                      file=sys.stderr, flush=True)
+            return
+        dc = self.engine.points
+        first_tier = rec["tier"]
+        state, view = render_state(messages)
+        verdicts: list[_Verdict] = []
+        final = bool(tools) and ends_turn(response, submit_re(dc.stop))
+        if os.environ.get("JAH_DEBUG"):
+            import sys
+            print(f"JAH stream_label: step={step} tier={first_tier} final={final} "
+                  f"stop={dc.stop.mode} pending={list(sess.pending)}", file=sys.stderr, flush=True)
+        if final and dc.stop.on and dc.stop.mode == "shadow" and \
+                not (first_tier == "strong" and dc.stop.scope != "all"):
+            a = await self.engine.asker.ask(
+                "stop", "shadow", f"{state}\n\nPROPOSED FINAL REPLY: {proposal_text(response)}", STOP,
+                self.engine.cfg.decision_timeout_s, dc.stop.tau, "done", view)
+            a.extra["tier"] = first_tier
+            a.effect = "logged"
+            verdicts.append(_Verdict(True, "finish_check", asks=[a]))
+        if verdicts:
+            _, v2 = await self._redo(request_data, messages, tools, response, first_tier, verdicts, sess,
+                                     step, state, view)
+            if v2 is not None:
+                verdicts.append(v2)
+        await settle(self.engine, sess, step, key, response, first_tier, verdicts)
 
     # ------------------------------------------------------------------ the checks
     async def _stop_check(self, resp: Any, c: Any, tier: str, state: str, view: Any) -> _Verdict | None:
@@ -280,10 +363,15 @@ class JahPostCall(CustomLogger):
         sess.fast_streak = 0
         sess.last_tier = "strong"
         sess.decided[step] = {**sess.decided[step], "tier": "strong", "reason": reasons[0]}
+        _f_usage = getattr(first_resp, "usage", None)
         sess.redo_calls[step] = [{
-            "tier": first_tier, "model": getattr(first_resp, "model", None),
-            "in": _num(getattr(first_resp, "usage", None), "prompt_tokens"),
-            "out": _num(getattr(first_resp, "usage", None), "completion_tokens"), "latency_s": None}]
+            # the request's model (the deployment's), not the response's: the proxy may echo back the
+            # requested alias (e.g. "jah-auto"), which the cost map does not know
+            "tier": first_tier, "model": request_data.get("model") or getattr(first_resp, "model", None),
+            "in": _num(_f_usage, "prompt_tokens"),
+            "out": _num(_f_usage, "completion_tokens"),
+            "cached": _num(getattr(_f_usage, "prompt_tokens_details", None), "cached_tokens"),
+            "latency_s": None}]
         sess.redo_calls[step].append(_call_entry(resp, lat))
         self._label_redo(redo, first_resp, resp, notes, sess)
         # the redo proposes a risky action: one more look (like the standalone proxy)
@@ -310,21 +398,31 @@ class JahPostCall(CustomLogger):
             return await self._recall(model, messages, tools, pass_through(request_data)), \
                 round(time.monotonic() - t0, 3)
         except Exception: # noqa: BLE001 - fail-safe: keep the original reply, the turn ends
+            if os.environ.get("JAH_DEBUG"):
+                import traceback
+                traceback.print_exc()
             return None, 0.0
         finally:
             in_check.reset(tok)
 
     async def _recall_default(self, model: str, messages: list[dict[str, Any]], tools: list[Any],
                               kwargs: dict) -> Any:
-        """The re-run: a direct ``litellm.acompletion`` on the strong model, like LiteLLM's own skills hook."""
+        """The re-run: a direct ``litellm.acompletion`` on the strong model, like LiteLLM's own skills hook.
+        Only the client's request parameters cross into the re-run: the source request may be the
+        logging event's ``model_call_details``, which is littered with litellm internals (responses,
+        logging objects, pending coroutines) that break ``acompletion()`` or leak upstream. ``stream`` /
+        ``stream_options`` never cross (the re-run must be non-streaming: its complete reply is judged)
+        and ``max_completion_tokens`` never crosses (the client's value predates the proxy's clamping
+        and can exceed the strong model's cap)."""
         from litellm import acompletion
+        client = {k: v for k, v in kwargs.items() if k in _RECALL_PARAMS}
         api_key = _expand_env(self.engine.cfg.strong_api_key)
         if api_key:
-            kwargs["api_key"] = api_key
+            client["api_key"] = api_key
         api_base = _expand_env(self.engine.cfg.strong_api_base)
         if api_base:
-            kwargs["api_base"] = api_base
-        return await acompletion(model=model, messages=messages, tools=tools, **kwargs)
+            client["api_base"] = api_base
+        return await acompletion(model=model, messages=messages, tools=tools, **client)
 
     # ------------------------------------------------------------------ labels and logs
     def _label_redo(self, redo: list[_Verdict], first_resp: Any, resp: Any, noted: list[str], sess: Any) -> None:

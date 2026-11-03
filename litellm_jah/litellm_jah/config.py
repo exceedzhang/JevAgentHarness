@@ -52,6 +52,9 @@ DEFAULTS: dict[str, Any] = {
     # the remaining decision points (tool select, stop, reflection, action): a preset and/or a decisions block
     "preset": None, # route | paper | safe | shadow
     "decisions": None, # {tool_select: {mode: shadow}, stop: {mode: guard}, ...}
+    # per-model prices for the step log's cost column: {model: {input, output, cached_input[, cache_write]}}
+    # in the billing currency per million tokens (the engine registers them into litellm's cost map)
+    "prices": None,
 }
 
 
@@ -80,6 +83,7 @@ class JAHCfg:
     model_name: str = DEFAULTS["model_name"]
     preset: str | None = None
     decisions: dict[str, Any] | None = None
+    prices: dict[str, Any] | None = None # per-model prices (currency per million tokens) for the cost column
 
     @property
     def points(self) -> Decisions:
@@ -127,6 +131,11 @@ class JAHCfg:
             raise ValueError("max_sessions and session_ttl_s must be > 0")
         if c.model_name in (None, ""):
             raise ValueError("model_name must be a non-empty string")
+        if c.prices is not None and (not isinstance(c.prices, Mapping) or not c.prices):
+            raise ValueError("prices must be a non-empty mapping of model -> {input, output, ...}")
+        for m, spec in (c.prices or {}).items():
+            if not isinstance(spec, Mapping) or "input" not in spec or "output" not in spec:
+                raise ValueError(f"prices[{m!r}]: expected a mapping with at least 'input' and 'output'")
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "JAHCfg":

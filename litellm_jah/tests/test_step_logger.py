@@ -16,7 +16,7 @@ from litellm_jah.precall import JahPreCall
 from conftest import FakeBackend, decision, msgs
 
 
-def fake_response(model="gemini/gemini-4-argon", in_t=120, out_t=30, cached=40, tool_calls=1, finish="tool_calls"):
+def fake_response(model="gemini/fake-argon-9000", in_t=120, out_t=30, cached=40, tool_calls=1, finish="tool_calls"):
     return SimpleNamespace(
         usage=SimpleNamespace(prompt_tokens=in_t, completion_tokens=out_t,
                               prompt_tokens_details=SimpleNamespace(cached_tokens=cached),
@@ -28,7 +28,7 @@ def fake_response(model="gemini/gemini-4-argon", in_t=120, out_t=30, cached=40, 
 
 
 def fake_kwargs(messages, model="jah-auto", **metadata):
-    return {"data": {"model": model, "messages": messages, "metadata": metadata}, "model": "gemini/gemini-4-argon"}
+    return {"data": {"model": model, "messages": messages, "metadata": metadata}, "model": "gemini/fake-argon-9000"}
 
 
 def rows_of(path):
@@ -58,7 +58,7 @@ def test_step_row_for_a_routed_step(tmp_path, run):
         assert r["input_tokens"] == 120 and r["output_tokens"] == 30 and r["cached_tokens"] == 40
         assert r["n_tool_calls"] == 1 and r["finish"] == "tool_calls"
         assert r["latency_s"] == pytest.approx(1.25, abs=0.01) and r["calls"][0]["tier"] == "strong"
-        assert r["calls"][0]["priced"] is False  # no litellm in the test env: logged as unpriced
+        assert r["calls"][0]["priced"] is False  # the fake model is not in the cost map: logged as unpriced
         assert r["cost_usd"] == r["llm_cost_usd"] == 0.0 and r["decision_cost_usd"] == 0.0
         assert "decision" in r and "ts" in r
         await engine.close()
@@ -223,3 +223,42 @@ def test_streamed_steps_settle_their_questions_legacy_data_shape(tmp_path, run):
         assert sess.step_points[1]["n_asks"] == 1
         await engine.close()
     run(go())
+
+
+def _cost_logger(tmp_path):
+    cfg = JAHCfg(decision={"type": "rules"}, log_dir=str(tmp_path))
+    return JahStepLogger(engine=JAHRouter(cfg, backend=FakeBackend(lambda n, s, q: decision(0.9))))
+
+
+def test_register_prices_writes_both_keys():
+    import litellm
+    cfg = JAHCfg(decision={"type": "rules"}, prices={"m-test-1": {"input": 2, "output": 8, "cached_input": 0.2}})
+    JAHRouter(cfg, backend=FakeBackend(lambda n, s, q: decision(0.9)))
+    try:
+        for key in ("m-test-1", "openai/m-test-1"):
+            e = litellm.model_cost[key]
+            assert e["input_cost_per_token"] == pytest.approx(2e-6)
+            assert e["output_cost_per_token"] == pytest.approx(8e-6)
+            assert e["cache_read_input_token_cost"] == pytest.approx(0.2e-6)
+    finally:
+        litellm.model_cost.pop("m-test-1", None)
+        litellm.model_cost.pop("openai/m-test-1", None)
+
+
+def test_cost_uses_the_price_map_with_cache_split(tmp_path):
+    import litellm
+    logger = _cost_logger(tmp_path)
+    litellm.model_cost["openai/m-priced"] = {"input_cost_per_token": 1e-6, "output_cost_per_token": 8e-6,
+                                             "cache_read_input_token_cost": 0.1e-6}
+    try:
+        assert logger._cost("openai/m-priced", 1000, 10) == (pytest.approx(0.00108), True)
+        # bare name resolves to the prefixed key; 900 of the 1000 prompt tokens are cached
+        cost, priced = logger._cost("m-priced", 1000, 10, {"cached_tokens": 900})
+        assert priced and cost == pytest.approx(100 * 1e-6 + 900 * 0.1e-6 + 10 * 8e-6)
+    finally:
+        litellm.model_cost.pop("openai/m-priced", None)
+
+
+def test_cost_unknown_model_is_unpriced(tmp_path):
+    assert _cost_logger(tmp_path)._cost("no-such-model-xyz", 100, 10) == (0.0, False)
+    assert _cost_logger(tmp_path)._cost(None, 100, 10) == (0.0, False)

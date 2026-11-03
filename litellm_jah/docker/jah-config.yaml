@@ -7,7 +7,11 @@
 #
 # Mount your own config and point LITELLM_JAH_CONFIG at it to customize.
 decision:
- type: rules
+ type: jev
+ provider: local # explicit model/base_url/key_env below override the provider defaults
+ model: decision-model-preview # Jev decision model on the maas (free input, 65K context)
+ base_url: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode # the backend appends /v1/systemone
+ key_env: DASHSCOPE_API_KEY
 tau: 0.75
 mode: cascade
 on_error: strong
@@ -17,3 +21,26 @@ strong_label: COMPLEX
 fast_label: SIMPLE
 log_dir: ~/.jah/litellm-logs
 model_name: jah-auto
+# Labelled-decision collection for `jah fit`: shadow mode asks each point and logs the
+# answer next to what the agent actually did, without changing the request. stop:shadow
+# still re-runs a fast final reply on the strong tier (same as verify_finish) - that redo's
+# outcome is the stop label. With the rules backend the shadow questions are free; once a
+# point has >= 30 labelled decisions, `jah fit ~/.jah/litellm-logs` fits its tau.
+decisions:
+  tool_select: {mode: shadow}
+  stop: {mode: shadow}
+# strong-tier re-run credentials (finish check / guard redos): the plugin's direct
+# litellm.acompletion calls cannot see the deployment's api_key, so name it here
+# (os.environ/NAME is read at call time, so the key stays out of the config)
+# the finish-check / guard re-run model (litellm SDK name; the endpoint comes from
+# strong_api_base below). Without it the re-run is skipped (effect: error_kept) and the
+# stop shadow rows never get their done/not_done labels.
+strong: openai/deepseek-v4.1-flash
+strong_api_key: os.environ/DASHSCOPE_API_KEY
+strong_api_base: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1
+# Per-model prices for the step log's cost column, in the billing currency per million
+# tokens (billed in CNY here, so the cost_usd column is CNY). `cached_input` is the cache-hit
+# input price and `cache_write` the explicit cache-creation price (both optional).
+prices:
+  deepseek-v4.1-flash: {input: 2, output: 8, cached_input: 0.2}
+  qwen3.8-flash: {input: 0.8, output: 2.7, cached_input: 0.1, cache_write: 1.25}

@@ -25,7 +25,7 @@ def _resp(s: int):
         usage=SimpleNamespace(prompt_tokens=100 + s, completion_tokens=10,
                               prompt_tokens_details=SimpleNamespace(cached_tokens=0),
                               completion_tokens_details=SimpleNamespace(reasoning_tokens=0)),
-        model="gemini/gemini-4-argon",
+        model="gemini/fake-argon-9000",
         choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[{"id": "t"}]), finish_reason="tool_calls")],
     )
 
@@ -40,7 +40,7 @@ def test_report_and_fit_on_plugin_logs(tmp_path, run):
             m = msgs(s)
             await engine.decide(m, {"session_id": "s1"})
             kwargs = {"data": {"model": "jah-auto", "messages": m, "metadata": {"session_id": "s1"}},
-                      "model": "gemini/gemini-4-argon"}
+                      "model": "gemini/fake-argon-9000"}
             await logger.async_log_success_event(kwargs, _resp(s), t0, t0 + 1.0)
         await engine.close()
     run(go())
@@ -54,7 +54,7 @@ def test_report_and_fit_on_plugin_logs(tmp_path, run):
     assert g["sessions"] == 1 and g["steps"] == 3
     assert g["tier_share"]["strong"] == 1.0
     assert g["reasons"].get("hard", 0) == 2 and g["reasons"].get("first_steps", 0) == 1
-    assert g["unpriced_calls"] == 3  # no litellm in the test env
+    assert g["unpriced_calls"] == 3  # the fake model is not in the cost map
     rendered = table(summary)
     assert "jah-auto" in rendered
 
