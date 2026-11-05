@@ -4,12 +4,12 @@
 #
 # Mount your own config and point LITELLM_JAH_CONFIG at it to customize.
 decision:
- type: jev
- provider: local # explicit model/base_url/key_env below override the provider defaults
- model: decision-model-preview # Jev decision model on the maas (free input, 65K context)
- base_url: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode # the backend appends /v1/systemone
- key_env: DASHSCOPE_API_KEY
- price_per_m: 0 # the decision model's input is free; the built-in fallback rate is USD-based
+  type: jev
+  provider: local # explicit model/base_url/key_env below override the provider defaults
+  model: AgentDecision-4B # self-hosted decision model, served through the ssh-tunnel container
+  base_url: http://ssh-tunnel:8000 # the backend appends /v1/systemone (ssh tunnel to the GPU box)
+  key_env: DECISION_API_KEY # read at call time; compose defaults it to the tunnel key (sk-1234)
+  price_per_m: 0 # self-hosted: no per-call API price to book (was the maas free-preview model)
 tau: 0.75
 mode: cascade
 on_error: strong

@@ -34,6 +34,9 @@ services:
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      # the self-hosted decision server behind the ssh tunnel (jah-config key_env);
+      # it authenticates, so the plugin needs a bearer token (tunnel-local, not a vendor key)
+      DECISION_API_KEY: ${DECISION_API_KEY:-sk-1234}
       # clamp a client max_tokens above the model's max output (see model_info
       # max_output_tokens in litellm_config.yaml) instead of forwarding it upstream
       LITELLM_MODIFY_PARAMS: "true"
@@ -50,6 +53,12 @@ services:
     depends_on:
       jah-redis:
         condition: service_healthy
+    # the ssh-tunnel container (AgentDecision-4B decision server) lives on another
+    # compose project's network; joining it makes the hostname `ssh-tunnel` resolvable
+    # here. It must exist first: `docker network inspect docker_default`.
+    networks:
+      - default
+      - tunnel
     # to scale: point the JAH session_store at the Redis container, then add more
     # replicas, e.g. "litellm-jah-2: { extends: litellm-jah, ports: ["4001:4000"] }"
     # with  session_store: {type: redis, url: redis://jah-redis:6379/0}  in jah-config.yaml
@@ -57,3 +66,9 @@ services:
 # the explicit name keeps this stack's containers/network apart from any other
 # compose project that happens to live in a directory called "docker"
 name: litellm-jah
+
+networks:
+  # the network of the compose project holding the `ssh-tunnel` decision server
+  tunnel:
+    external: true
+    name: docker_default
