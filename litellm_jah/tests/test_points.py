@@ -329,3 +329,18 @@ def test_asker_carries_the_calibrated_flag(run):
         a.error, a.p = "RuntimeError: boom", {}
         assert a.record()["calibrated"] is None  # a failed ask has no distribution, so nothing to place
     run(go())
+
+
+def test_asker_carries_the_truncated_flag(run):
+    # a truncated state is an era marker too: taus fitted on full states do not transfer to tail-only ones
+    from litellm_jah.backend import Question as BQuestion
+
+    class Trunc:
+        async def decide(self, state, q):
+            return Decision(p={"done": 0.8, "not_done": 0.2}, model="m", truncated=True)
+
+    async def go():
+        a = await Asker(Trunc()).ask("stop", "shadow", "S",
+                                     BQuestion(id="task_done", text="t", options=["done", "not_done"]), 5.0)
+        assert a.truncated and a.record()["truncated"] is True
+    run(go())

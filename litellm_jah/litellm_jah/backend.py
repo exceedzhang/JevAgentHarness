@@ -61,6 +61,7 @@ class Decision:
     input_tokens: int = 0
     why: str = ""
     calibrated: bool = False  # p lives in the model card's calibrated space (JevBackend.calibration applied)
+    truncated: bool = False  # the state was cut to its tail before sending (JevBackend.max_state_tokens)
 
     @property
     def choice(self) -> str:
@@ -118,17 +119,57 @@ def _check_calibration(cal: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return {"global": g, "buckets": buckets}
 
 
+# The deployed 4B answers on a 4096-token context (measured on the live endpoint: HTTP 400
+# ContextWindowExceeded with "maximum context length is 40.."). The card's own server truncates the prompt to its
+# last tokens and training used that cap, so an over-long state must be cut to its tail here (the current step,
+# which the question is about, lives at the end; the question itself costs ~250 tokens, leaving ~3.3k).
+# English/code runs are ~3.5-4 chars per token, CJK is ~1 char per token, so the budget is an estimate in tokens,
+# not raw characters: the observed 9.5k-char states pass in English and blow the window in Chinese.
+DEFAULT_MAX_STATE_TOKENS = 2800
+TRUNC_NOTE = "[jah: earlier context truncated; only the recent steps are shown]\n"
+
+
+def _est_tokens(s: str) -> float:
+    """A rough token count: non-ASCII (CJK) at one token per char, ASCII at one per three (conservative:
+    the ratio that matters is the one that could overflow the window)."""
+    na = sum(1 for ch in s if ord(ch) > 0x7F)
+    return na + (len(s) - na) / 3.0
+
+
+def _truncate_state(state: str, max_tokens: int) -> tuple[str, bool]:
+    """Keep the tail of the state within ``max_tokens`` (estimated). Cut on a line boundary when one is nearby so
+    the first line shown is whole. Deterministic: the same transcript always produces the same request bytes."""
+    if _est_tokens(state) <= max_tokens:
+        return state, False
+    n = min(len(state), int(max_tokens * 3.0))  # an all-ASCII state needs no more than this
+    for _ in range(4):  # converge: re-estimate the candidate and shrink proportionally
+        tail = state[-n:]
+        nl = tail.find("\n")
+        if 0 <= nl < 400:  # a partial leading line is common: drop it, the following text is a whole line
+            tail = tail[nl + 1:]
+        cand = TRUNC_NOTE + tail
+        est = _est_tokens(cand)
+        if est <= max_tokens or n <= 64:
+            return cand, True
+        n = max(64, int(n * max_tokens / est) - 8)
+    return cand, True  # the loop is a converging shrink; unreachable in practice
+
+
 class JevBackend(DecisionBackend):
     name = "jev"
 
     def __init__(self, provider: str = "openrouter", model: str | None = None, base_url: str | None = None,
                  key_env: str | None = None, timeout_s: float = 8.0, retries: int = 2,
-                 price_per_m: float | None = None, calibration: Mapping[str, Any] | None = None) -> None:
+                 price_per_m: float | None = None, calibration: Mapping[str, Any] | None = None,
+                 max_state_tokens: int | None = None) -> None:
         price = JEV_PRICE_PER_M_INPUT if price_per_m is None else float(price_per_m)
         if not math.isfinite(price) or price < 0:
             raise ValueError("price_per_m must be a non-negative finite number")
         self.price_per_m = price
         self.calibration = _check_calibration(calibration)
+        self.max_state_tokens = DEFAULT_MAX_STATE_TOKENS if max_state_tokens is None else int(max_state_tokens)
+        if self.max_state_tokens < 128:
+            raise ValueError("max_state_tokens must be at least 128 (the truncation note alone costs ~25)")
         pre = PROVIDERS.get(provider, PROVIDERS["openrouter"])
         self.provider = provider
         self.model = model or pre["model"]
@@ -151,6 +192,7 @@ class JevBackend(DecisionBackend):
         return self._session
 
     async def decide(self, state: str, q: Question) -> Decision:
+        state, truncated = _truncate_state(state, self.max_state_tokens)
         body = {"state": state, "model": self.model, "questions": {q.id: q.wire()}}
         headers = {"Content-Type": "application/json"}
         if self._key():
@@ -165,7 +207,7 @@ class JevBackend(DecisionBackend):
                     text = await r.text()
                     if r.status == 200:
                         data = json.loads(text)
-                        return self._parse(data, q, time.monotonic() - t0)
+                        return self._parse(data, q, time.monotonic() - t0, truncated=truncated)
                     last = f"HTTP {r.status}: {text[:200]}"
                     if r.status not in RETRY_STATUS:
                         break
@@ -176,7 +218,7 @@ class JevBackend(DecisionBackend):
                 delay *= 2
         raise RuntimeError(f"decision model failed: {last}")
 
-    def _parse(self, data: Mapping[str, Any], q: Question, latency: float) -> Decision:
+    def _parse(self, data: Mapping[str, Any], q: Question, latency: float, truncated: bool = False) -> Decision:
         a = (data.get("answers") or {}).get(q.id) or {}
         probs = a.get("probabilities") or ({a["choice"]: 1.0} if "choice" in a else {})
         p = {o: float(probs.get(o, 0.0)) for o in q.options}
@@ -188,15 +230,15 @@ class JevBackend(DecisionBackend):
         if self.calibration is not None:  # the card's temperature, as p' ∝ p^(1/T): equivalent to softmax(logits/T)
             t = self.calibration["buckets"].get(f"choice:{_bucket(len(p))}", self.calibration["global"])
             e = 1.0 / t
-            q = {k: v ** e for k, v in p.items()}
-            s = sum(q.values())  # p summed to 1 and e > 0, so s > 0
-            p = {k: v / s for k, v in q.items()}
+            w = {k: v ** e for k, v in p.items()}
+            s = sum(w.values())  # p summed to 1 and e > 0, so s > 0
+            p = {k: v / s for k, v in w.items()}
             calibrated = True
         u = data.get("usage") or {}
         tokens = int(u.get("input_tokens") or 0)
         cost = float(u["cost"]) if isinstance(u.get("cost"), (int, float)) else tokens * self.price_per_m / 1e6
         return Decision(p=p, model=str(data.get("model") or self.model), cost_usd=cost, latency_s=latency,
-                        input_tokens=tokens, calibrated=calibrated)
+                        input_tokens=tokens, calibrated=calibrated, truncated=truncated)
 
     async def close(self) -> None:
         if self._session is not None:
@@ -204,7 +246,7 @@ class JevBackend(DecisionBackend):
 
     def describe(self) -> dict[str, Any]:
         return {"backend": self.name, "provider": self.provider, "model": self.model, "base_url": self.base_url,
-                "calibrated": self.calibration is not None}
+                "calibrated": self.calibration is not None, "max_state_tokens": self.max_state_tokens}
 
 
 # ------------------------------------------------------------------------------------------------ rules (no model)
@@ -277,7 +319,7 @@ def make_backend(spec: Mapping[str, Any] | None) -> DecisionBackend:
     kind = spec.pop("type", "rules")
     if kind == "jev":
         allowed = {"provider", "model", "base_url", "key_env", "timeout_s", "retries",
-                   "price_per_m", "calibration"}
+                   "price_per_m", "calibration", "max_state_tokens"}
         unknown = set(spec) - allowed
         if unknown:
             raise ValueError(f"unknown decision backend options {sorted(unknown)}; allowed: {sorted(allowed)}")

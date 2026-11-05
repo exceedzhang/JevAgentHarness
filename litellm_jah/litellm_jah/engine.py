@@ -166,7 +166,8 @@ class JAHRouter:
                 p_hard = float(d.p.get(HARD, 0.0))
                 decision = {"model": d.model, "cost_usd": d.cost_usd, "latency_s": round(time.monotonic() - t0, 4),
                             "input_tokens": d.input_tokens, "why": d.why or None, "state_chars": len(state),
-                            "calibrated": bool(getattr(d, "calibrated", False))}
+                            "calibrated": bool(getattr(d, "calibrated", False)),
+                            "truncated": bool(getattr(d, "truncated", False))}
                 if rmode == "shadow":
                     tier, reason = STRONG, "shadow"
                 else:
@@ -211,5 +212,6 @@ class JAHRouter:
             "acted": reason in ("hard", "routine"), "effect": reason, "label": None, "label_tier": None,
             "agree": None, "fit_ok": False, "latency_s": round(float(d.get("latency_s") or 0.0), 4),
             "cost_usd": round(float(d.get("cost_usd") or 0.0), 8), "model": str(d["model"]) if d.get("model") else None,
-            "rounds": 1, "calibrated": d.get("calibrated") if p else None, "error": d.get("error"),
+            "rounds": 1, "calibrated": d.get("calibrated") if p else None,
+            "truncated": d.get("truncated") if p else None, "error": d.get("error"),
         }

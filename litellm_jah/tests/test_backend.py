@@ -128,6 +128,61 @@ def test_make_backend_passes_the_price():
     assert make_backend({"type": "jev", "price_per_m": 0}).price_per_m == 0.0
 
 
+def test_truncate_state_keeps_the_tail_within_the_token_budget():
+    from litellm_jah.backend import TRUNC_NOTE, _est_tokens, _truncate_state
+
+    ascii_state = "".join(f"row {i} of the transcript log\n" for i in range(1500))  # ~40k chars, ~8.5k tokens
+    out, tr = _truncate_state(ascii_state, 3000)
+    assert tr and out.startswith(TRUNC_NOTE) and _est_tokens(out) <= 3000
+    assert ascii_state.endswith(out[len(TRUNC_NOTE):])  # exact tail bytes: same transcript -> same request bytes
+    assert _truncate_state(ascii_state, 3000)[0] == out  # deterministic
+    assert not out[len(TRUNC_NOTE):].startswith("\n")  # cut on a line boundary
+    cjk = "你好世界记录一下当前步骤 " * 800  # CJK is ~1 token per char: the same chars are ~10x the cost
+    out2, tr2 = _truncate_state(cjk, 3000)
+    assert tr2 and _est_tokens(out2) <= 3000 and cjk.endswith(out2[len(TRUNC_NOTE):])
+    short = "tiny state"
+    assert _truncate_state(short, 2800) == (short, False)  # within budget: bit-for-bit untouched
+
+
+def test_jev_backend_sends_a_truncated_state(run):
+    from litellm_jah.backend import TRUNC_NOTE, _est_tokens
+
+    seen: list[str] = []
+
+    async def handle(request: web.Request) -> web.Response:
+        seen.append((await request.json())["state"])
+        return web.json_response({"answers": {"next_step": {"probabilities": {"routine": 0.7, "hard": 0.3}}}})
+
+    async def go():
+        app = web.Application()
+        app.router.add_post("/v1/systemone", handle)
+        server = TestServer(app)
+        await server.start_server()
+        be = JevBackend(provider="local", base_url=str(server.make_url("")), key_env="", retries=0,
+                        max_state_tokens=1500)
+        try:
+            long = "".join(f"row {i} of the transcript log\n" for i in range(1500))
+            d = await be.decide(long, QUESTION)
+            assert d.truncated and _est_tokens(seen[-1]) <= 1500
+            assert long.endswith(seen[-1][len(TRUNC_NOTE):])
+            d = await be.decide("a short state", QUESTION)
+            assert not d.truncated and seen[-1] == "a short state"
+            assert be.describe()["max_state_tokens"] == 1500
+        finally:
+            await be.close()
+            await server.close()
+    run(go())
+
+
+def test_jev_backend_validates_max_state_tokens():
+    from litellm_jah.backend import DEFAULT_MAX_STATE_TOKENS, make_backend
+
+    assert JevBackend().max_state_tokens == DEFAULT_MAX_STATE_TOKENS
+    with pytest.raises(ValueError):
+        JevBackend(max_state_tokens=100)  # below even the truncation note's cost
+    assert make_backend({"type": "jev", "max_state_tokens": 3000}).max_state_tokens == 3000
+
+
 def test_calibration_bucket_boundaries():
     from litellm_jah.backend import _bucket
 
