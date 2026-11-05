@@ -60,6 +60,7 @@ class Decision:
     latency_s: float = 0.0
     input_tokens: int = 0
     why: str = ""
+    calibrated: bool = False  # p lives in the model card's calibrated space (JevBackend.calibration applied)
 
     @property
     def choice(self) -> str:
@@ -79,16 +80,55 @@ class DecisionBackend:
         return {"backend": self.name}
 
 
+CALIBRATION_KEYS = frozenset({f"choice:{b}" for b in ("2", "3-5", "6-16", "17-52")} | {"noul:2"})
+
+
+def _bucket(n: int) -> str:
+    """The model card's bucket for a question with n options (its README's ``bucket()``)."""
+    return "2" if n == 2 else "3-5" if n <= 5 else "6-16" if n <= 16 else "17-52"
+
+
+def _check_calibration(cal: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Validate ``decision.calibration``: the model card's calibration.json (a temperature per
+    ``<kind>:<bucket>``, ``global`` the fallback) written inline. Our servers answer raw T=1 probabilities,
+    so the plugin applies the temperatures itself (``_parse``). Fail-closed: an invalid block raises at
+    startup rather than being silently ignored, because silently skipping calibration would re-introduce
+    the misread taus it is there to prevent."""
+    if cal is None:
+        return None
+    if not isinstance(cal, Mapping):
+        raise ValueError("decision.calibration must be a mapping {global: T, buckets: {key: T}}")
+    try:
+        g = float(cal["global"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("decision.calibration.global must be the global temperature") from None
+    if not math.isfinite(g) or g <= 0:
+        raise ValueError("decision.calibration.global must be a finite temperature greater than 0")
+    buckets: dict[str, float] = {}
+    for k, v in (cal.get("buckets") or {}).items():
+        if k not in CALIBRATION_KEYS:
+            raise ValueError(f"unknown calibration bucket {k!r}; allowed: {sorted(CALIBRATION_KEYS)}")
+        try:
+            t = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"calibration bucket {k} must be a finite number") from None
+        if not math.isfinite(t) or t <= 0:
+            raise ValueError(f"calibration bucket {k} must be a finite temperature greater than 0")
+        buckets[k] = t
+    return {"global": g, "buckets": buckets}
+
+
 class JevBackend(DecisionBackend):
     name = "jev"
 
     def __init__(self, provider: str = "openrouter", model: str | None = None, base_url: str | None = None,
                  key_env: str | None = None, timeout_s: float = 8.0, retries: int = 2,
-                 price_per_m: float | None = None) -> None:
+                 price_per_m: float | None = None, calibration: Mapping[str, Any] | None = None) -> None:
         price = JEV_PRICE_PER_M_INPUT if price_per_m is None else float(price_per_m)
         if not math.isfinite(price) or price < 0:
             raise ValueError("price_per_m must be a non-negative finite number")
         self.price_per_m = price
+        self.calibration = _check_calibration(calibration)
         pre = PROVIDERS.get(provider, PROVIDERS["openrouter"])
         self.provider = provider
         self.model = model or pre["model"]
@@ -144,18 +184,27 @@ class JevBackend(DecisionBackend):
         if s <= 0:
             raise RuntimeError(f"decision model returned no distribution: {str(a)[:200]}")
         p = {k: v / s for k, v in p.items()}
+        calibrated = False
+        if self.calibration is not None:  # the card's temperature, as p' ∝ p^(1/T): equivalent to softmax(logits/T)
+            t = self.calibration["buckets"].get(f"choice:{_bucket(len(p))}", self.calibration["global"])
+            e = 1.0 / t
+            q = {k: v ** e for k, v in p.items()}
+            s = sum(q.values())  # p summed to 1 and e > 0, so s > 0
+            p = {k: v / s for k, v in q.items()}
+            calibrated = True
         u = data.get("usage") or {}
         tokens = int(u.get("input_tokens") or 0)
         cost = float(u["cost"]) if isinstance(u.get("cost"), (int, float)) else tokens * self.price_per_m / 1e6
         return Decision(p=p, model=str(data.get("model") or self.model), cost_usd=cost, latency_s=latency,
-                        input_tokens=tokens)
+                        input_tokens=tokens, calibrated=calibrated)
 
     async def close(self) -> None:
         if self._session is not None:
             await self._session.close()
 
     def describe(self) -> dict[str, Any]:
-        return {"backend": self.name, "provider": self.provider, "model": self.model, "base_url": self.base_url}
+        return {"backend": self.name, "provider": self.provider, "model": self.model, "base_url": self.base_url,
+                "calibrated": self.calibration is not None}
 
 
 # ------------------------------------------------------------------------------------------------ rules (no model)
@@ -228,7 +277,7 @@ def make_backend(spec: Mapping[str, Any] | None) -> DecisionBackend:
     kind = spec.pop("type", "rules")
     if kind == "jev":
         allowed = {"provider", "model", "base_url", "key_env", "timeout_s", "retries",
-                   "price_per_m"}
+                   "price_per_m", "calibration"}
         unknown = set(spec) - allowed
         if unknown:
             raise ValueError(f"unknown decision backend options {sorted(unknown)}; allowed: {sorted(allowed)}")

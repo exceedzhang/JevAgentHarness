@@ -10,6 +10,19 @@ decision:
   base_url: http://ssh-tunnel:8000 # the backend appends /v1/systemone (ssh tunnel to the GPU box)
   key_env: DECISION_API_KEY # read at call time; compose defaults it to the tunnel key (sk-1234)
   price_per_m: 0 # self-hosted: no per-call API price to book (was the maas free-preview model)
+  # The card's calibration.json (JevAgentHarness/AgentDecision-4B). Our ssh-tunnel server answers raw T=1
+  # probabilities (probed on the live endpoint), so the plugin applies the temperatures itself:
+  # p' ∝ p^(1/T) per <kind>:<bucket>, `global` the fallback (see docs/calibration-proposal.md).
+  # With this block taus are read in the calibrated space; taus fitted earlier on 4B/raw rows (jah fit
+  # 11-04/11-05) are NOT comparable - decisions rows carry model x calibrated so the fit eras cut apart.
+  # The quoted keys are not a YAML 1.1 `off`-style necessity ("noul:2" parses as a string unquoted too);
+  # quotes are used for visibility. choice:6-16 has no bucket on the card, so <=16-option asks get `global`.
+  calibration:
+    global: 0.7720006824268275
+    buckets:
+      "noul:2": 0.4230827372940139
+      "choice:17-52": 0.05000000000004328 # unreachable in the plugin (asks never offer > 16 options)
+      "choice:3-5": 0.9676007232026532
 tau: 0.75
 mode: cascade
 on_error: strong

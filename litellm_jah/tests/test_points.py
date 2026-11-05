@@ -311,3 +311,21 @@ def test_pass_through_drops_client_provider_redirects():
               "azure_ad_token", "organization", "api_key", "model", "messages", "tools", "metadata"):
         assert k not in out
     assert out["temperature"] == 0.2 and out["max_tokens"] == 5
+
+
+def test_asker_carries_the_calibrated_flag(run):
+    # decisions rows read `calibrated`: raw and calibrated probabilities are different spaces and one
+    # fitted tau must never mix them (the fit eras are cut on model x calibrated)
+    from litellm_jah.backend import Question as BQuestion
+
+    class Caled:
+        async def decide(self, state, q):
+            return Decision(p={"done": 0.8, "not_done": 0.2}, model="m", calibrated=True)
+
+    async def go():
+        a = await Asker(Caled()).ask("stop", "shadow", "S",
+                                     BQuestion(id="task_done", text="t", options=["done", "not_done"]), 5.0)
+        assert a.calibrated and a.record()["calibrated"] is True
+        a.error, a.p = "RuntimeError: boom", {}
+        assert a.record()["calibrated"] is None  # a failed ask has no distribution, so nothing to place
+    run(go())

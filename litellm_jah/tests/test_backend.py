@@ -126,3 +126,91 @@ def test_make_backend_passes_the_price():
     from litellm_jah.backend import make_backend
 
     assert make_backend({"type": "jev", "price_per_m": 0}).price_per_m == 0.0
+
+
+def test_calibration_bucket_boundaries():
+    from litellm_jah.backend import _bucket
+
+    assert _bucket(2) == "2" and _bucket(3) == "3-5" and _bucket(5) == "3-5"
+    assert _bucket(6) == "6-16" and _bucket(16) == "6-16" and _bucket(17) == "17-52" and _bucket(52) == "17-52"
+
+
+def test_check_calibration_fails_closed():
+    from litellm_jah.backend import _check_calibration
+
+    assert _check_calibration(None) is None
+    assert _check_calibration({"global": 0.772}) == {"global": 0.772, "buckets": {}}
+    for bad in ([], "x", {}, {"buckets": {}}, {"global": 0}, {"global": -1}, {"global": float("nan")},
+                {"global": float("inf")}, {"global": 0.7, "buckets": {"choice:99": 0.5}},
+                {"global": 0.7, "buckets": {"noul:2": "warm"}}):
+        with pytest.raises(ValueError):
+            _check_calibration(bad)
+
+
+def test_jev_backend_applies_the_card_temperature(run):
+    T = 0.7720006824268275  # the card's global temperature; routing/stop are 2-option choice questions
+
+    async def handle(request: web.Request) -> web.Response:
+        return web.json_response({"answers": {"next_step": {"probabilities": {"routine": 0.3, "hard": 0.7}}}})
+
+    async def go():
+        app = web.Application()
+        app.router.add_post("/v1/systemone", handle)
+        server = TestServer(app)
+        await server.start_server()
+        be = JevBackend(provider="local", base_url=str(server.make_url("")), key_env="", retries=0,
+                        calibration={"global": T})
+        try:
+            d = await be.decide("S", QUESTION)
+            e = 1.0 / T
+            assert d.p["hard"] == pytest.approx(0.7 ** e / (0.7 ** e + 0.3 ** e), abs=1e-9)
+            assert sum(d.p.values()) == pytest.approx(1.0) and d.calibrated
+        finally:
+            await be.close()
+            await server.close()
+    run(go())
+
+
+def test_calibration_takes_the_bucket_then_the_global(run):
+    probs = {"a": 0.4, "b": 0.3, "c": 0.2, "d": 0.1}  # a 4-option question: bucket choice:3-5
+
+    async def handle(request: web.Request) -> web.Response:
+        return web.json_response({"answers": {"next_tool": {"probabilities": probs}}})
+
+    async def go():
+        app = web.Application()
+        app.router.add_post("/v1/systemone", handle)
+        server = TestServer(app)
+        await server.start_server()
+        base = str(server.make_url(""))
+        q = Question(id="next_tool", text="t", options=["a", "b", "c", "d"])
+        be = JevBackend(provider="local", base_url=base, key_env="", retries=0,
+                        calibration={"global": 2.0, "buckets": {"choice:3-5": 0.5}})
+        try:
+            d = await be.decide("S", q)
+            w = [v ** (1.0 / 0.5) for v in probs.values()]  # the bucket temperature, not the global one
+            s = sum(w)
+            for k, want in zip(q.options, [x / s for x in w]):
+                assert d.p[k] == pytest.approx(want, abs=1e-9)
+            be2 = JevBackend(provider="local", base_url=base, key_env="", retries=0)
+            d2 = await be2.decide("S", q)  # without the block: the raw probabilities, bit-for-bit as before
+            assert not d2.calibrated and d2.p == probs
+        finally:
+            await be.close()
+            await be2.close()
+            await server.close()
+    run(go())
+
+
+def test_make_backend_passes_the_calibration():
+    from litellm_jah.backend import make_backend
+
+    be = make_backend({"type": "jev", "price_per_m": 0, "calibration": {"global": 0.772}})
+    assert be.calibration == {"global": 0.772, "buckets": {}}
+    assert be.describe()["calibrated"] is True
+    with pytest.raises(ValueError):
+        make_backend({"type": "jev", "calibration": {"global": 0}})
+
+
+def test_describe_without_calibration_is_not_calibrated():
+    assert JevBackend().describe()["calibrated"] is False

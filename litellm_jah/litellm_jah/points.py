@@ -521,6 +521,7 @@ class Ask:
     act_option: str | None = None # the option whose probability is compared with tau
     p: dict[str, float] = field(default_factory=dict)
     model: str = ""
+    calibrated: bool = False  # p is in the model card's calibrated space (backend.py applies its temperatures)
     cost_usd: float = 0.0
     latency_s: float = 0.0
     rounds: int = 1
@@ -558,6 +559,7 @@ class Ask:
             "acted": self.acted, "effect": self.effect, "label": self.label, "label_tier": self.label_tier,
             "agree": agree, "fit_ok": self.fit_ok, "latency_s": round(self.latency_s, 4),
             "cost_usd": round(self.cost_usd, 8), "model": self.model or None, "rounds": self.rounds,
+            "calibrated": self.calibrated if self.p else None,
             "error": self.error}
         rec.update(self.extra)
         return rec
@@ -583,6 +585,7 @@ class Asker:
             d = await self._decide(state, q, timeout, view)
             a.p = {o: float(d.p.get(o, 0.0)) for o in q.options}
             a.model, a.cost_usd = d.model, float(d.cost_usd or 0.0)
+            a.calibrated = bool(getattr(d, "calibrated", False))  # rules/none backends have no temperatures to apply
             if not any(a.p.values()):
                 raise RuntimeError("the decision model returned no probability for any option")
         except Exception as e: # noqa: BLE001 - a decision-model failure falls back to the LLM-only behaviour
