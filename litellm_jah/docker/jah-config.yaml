@@ -40,17 +40,21 @@ strong_label: COMPLEX
 fast_label: SIMPLE
 log_dir: ~/.jah/litellm-logs
 model_name: jah-auto
-# Labelled-decision collection for `jah fit`: shadow mode asks each point and logs the
-# answer next to what the agent actually did, without changing the request. stop:shadow
-# still re-runs a fast final reply on the strong tier (same as verify_finish) - that redo's
- # outcome is the stop label. The decision model's input is free, so collection adds no billed cost.
-# Once a point has >= 30 labelled decisions, `jah fit ~/.jah/litellm-logs` fits its tau.
+# Decision points. Both label-collecting points are off on evidence from `jah fit` (see each comment);
+# routing stays in cascade mode with the tau below, and the strong-tier re-run credentials stay configured
+# for any future guard/strong mode. Nothing is collected for `jah fit` right now: switch a point back to
+# {mode: "shadow"} to restart labelling (quoted strings only - YAML 1.1 reads a bare off/on as booleans).
 decisions:
   # tool_select is off on purpose: fitted on 344 labelled decisions, no tau reached the 95%
   # agreement target (best 18%); the model predicts "reply without tool" on 77% of steps where
   # the agent calls one, so acting on it would suppress tool use. Revisit only with a new model.
   tool_select: {mode: "off"}
-  stop: {mode: shadow}
+  # stop is off on purpose: on AgentDecision-4B calibrated (81 labelled decisions) it agrees with the strong
+  # verdict on 61.7% of final replies and no tau reached the 95% target - and in shadow the strong redo's reply
+  # was discarded anyway, so the mode bought labels, not protection, at the price of one strong call on every
+  # fast final answer (~6% of steps, the whole transcript) plus ~0.24 s. Protection on early stops would be
+  # stop: {mode: strong} - not recommended: the fit says the decision model disagrees with the redo too often.
+  stop: {mode: "off"}
 # strong-tier re-run credentials (finish check / guard redos): the plugin's direct
 # litellm.acompletion calls cannot see the deployment's api_key, so name it here
 # (os.environ/NAME is read at call time, so the key stays out of the config)
