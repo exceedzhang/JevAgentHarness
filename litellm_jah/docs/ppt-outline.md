@@ -36,7 +36,7 @@
 |---|---|
 | ① 支持各种 harness | 标准 OpenAI 兼容 API + LiteLLM 代理：任何 harness 只需改 `base_url` 和 key，无需改代码 |
 | ② 降低 token 成本 | 简单步骤路由到 fast 层（价格低一个量级），按自己的计价表精确审计每步成本 |
-| ③ 不降任务准确率 | finish check（fast 终答由 strong 重跑）+ on_error=strong + 多决策点 guard 兜底 |
+| ③ 不降任务准确率 | hard 步强制 strong + on_error=strong（决策层故障兜底）；finish check / guard 复核为可选机制，按 fit 数据决定开关（见 S16） |
 | ④ 提高执行速度 | fast 层处理占多数的 routine 步骤；决策开销仅 ~0.2 s/步（单步 LLM 延迟 ~12 s 量级） |
 
 > 讲稿提示：④的"提速"来自 fast 层模型本身更快；当前日志记录每步 LLM 延迟
@@ -105,7 +105,7 @@
   - **action**：拟执行的动作是否危险？
 - 统一语义：**fast 层产出 + strong 层复核**，只有复核不过才重跑（一次）；
   重跑失败则保留原回复——hook 永远不破坏已完成的请求（fail-safe）
-- 本部署当前开启：routing=cascade + stop=shadow（含 finish check）；tool_select 经数据验证后关闭（见 S16）
+- 本部署当前开启：routing=cascade（tau 0.80）+ on_error=strong；stop 与 tool_select 都经两轮 fit 验证后关闭（见 S16）
 
 ## S8 原理三：shadow → fit → promote 自校准闭环
 
@@ -176,8 +176,8 @@
 | 配置 | 含义 | 本部署取值 |
 |---|---|---|
 | `decision` | 决策后端 | `{type: jev, provider: local, model: decision-model-preview}` |
-| `tau` | p(hard) ≥ tau 升级 strong | 0.75 |
-| `mode` / `decisions.*` | routing 及五决策点模式 | routing=cascade；stop=shadow；tool_select="off"（注意 YAML 1.1：裸 off 是布尔，要加引号） |
+| `tau` | p(hard) ≥ tau 升级 strong | 0.80（11-05 按校准 4B 分布上调） |
+| `mode` / `decisions.*` | routing 及五决策点模式 | routing=cascade；stop="off"；tool_select="off"（注意 YAML 1.1：裸 off 是布尔，要加引号） |
 | `first_steps_strong` | 开局强制 strong 步数 | 1 |
 | `on_error` | 决策失败时走哪层 | strong |
 | `strong` + `strong_api_key/base` | 重跑模型与凭据 | deepseek-v4.1-flash（`os.environ/…`，key 不进配置文件） |
@@ -196,7 +196,8 @@ jah fit    ~/.jah/litellm-logs   # 阈值拟合 + 各决策点 describe 表
 - 日常：看 `jah report` 的 strong 占比与成本趋势，判断负载是否变化
 - 调阈值：某点 shadow 标签 ≥ 30 条 → `jah fit` → 有 tau 达 95% 才 promote，否则保持/关闭
 - 本部署节奏示例：tool_select 标签 54 → 344 条、两轮 fit 结论一致（不可用）→ 关；
-  stop 标签 14 条、方向正确（tau 0.70 时 11/11 全对）→ 继续攒
+  stop 14 条时 tau 0.70 全对（但下界不过关）→ 继续攒到 81 条 → 第二轮 fit 证伪 → 关——
+  ≥30 样本 + Wilson 下界的门槛就是为拦住小样本假信号设的
 
 ## S15 实验数据：总览（截至 11-04，真实日志）
 
@@ -226,7 +227,7 @@ jah fit    ~/.jah/litellm-logs   # 阈值拟合 + 各决策点 describe 表
 | 决策点:模式 | calls | 错误 | p50 延迟 |
 |---|---|---|---|
 | routing:cascade | 1033 | 0 | 0.195 s |
-| stop:shadow | 19（14 带标签） | 0 | 0.193 s |
+| stop:shadow（11-05 已关） | 19（14 带标签，最终累计 81 条） | 0 | 0.193 s |
 | tool_select:shadow（已关） | 694（350 带标签） | 4（旧遗留） | 0.259 s |
 
 `jah fit`（目标：与 LLM 一致率 ≥ 95%，Wilson 下界，≥30 样本）：
@@ -236,10 +237,12 @@ jah fit    ~/.jah/litellm-logs   # 阈值拟合 + 各决策点 describe 表
   （reply_without_tool→bash 111 条等）。若当时直接上 guard，约 3/4 步骤会被错误地压成
   "直接回答"。**shadow 机制在 promote 前拦截了这个坏配置** → 已设 `mode: "off"`，
   省掉每步 ~0.26 s 决策延迟
-- **stop：方向正确，样本不够**——14 条标签，tau 0.70 时 11/11 = 100%（Wilson 下界 80.3% < 95%）；
-  两条判错恰好是置信度最低的两条（p(done) 0.54 / 0.69）。再攒 ≥16 条即可拟合
-- **routing：无标签可拟合**（strong 层怎么答未知），fires 25.4%@tau 0.75；
-  tau 0.85 → 16.7%、0.9 → 11.7%（降本旋钮，代价：中间步失去 finish check 之外的复核）
+- **stop：负结论（11-05 定案）**——第一轮 14 条标签时 tau 0.70 全对（11/11）但 Wilson 下界
+  80.3% 不过关；攒到 81 条重拟合，总体一致率仅 **61.7%**，任何 tau 达不到 95%。且 shadow 的重跑
+  回复本就丢弃（只采标签、不提供保护），代价是每次 fast 终答（~6% 步）一次全上下文 strong 调用
+  + ~0.24 s → `mode: "off"`。小样本假信号被门槛拦住，正是闭环设计的证明
+- **routing：无标签可拟合**（strong 层怎么答未知），只有 tau 一个旋钮：fires 25.4%@0.75、
+  16.7%@0.85、11.7%@0.9。11-05 校准 4B 的 p(hard) 分布右移（strong 一度到 69%），tau 上调至 0.80
 
 建议图：tool_select 混淆矩阵 top 条 + stop 的 tau-覆盖率-一致率曲线。
 
@@ -260,10 +263,10 @@ jah fit    ~/.jah/litellm-logs   # 阈值拟合 + 各决策点 describe 表
 结论：
 
 - 四个目标都落地：任意 harness 接一个 OpenAI 兼容端点即用；simple 步走 fast 层直接省钱
-  （本部署 fast 占 63%、24h ¥20.91/869 步、缓存命中 95%）；finish check + on_error=strong
+  （本部署 fast 占 63%、24h ¥20.91/869 步、缓存命中 95%）；hard 步强升 + on_error=strong
   守住准确率；决策开销 ~0.2 s 相对单步 ~12 s 可忽略
-- 闭环机制验证有效：tool_select 的负结论是**机制的正确输出**——shadow 采集 → fit 证伪 →
-  不 promote，避免了 87% 步骤被误杀工具调用
+- 闭环机制验证有效：tool_select 与 stop 的负结论都是**机制的正确输出**——shadow 采集 → fit 证伪 →
+  不 promote（前者会误杀 ~87% 步骤的工具调用；后者 81 条标签定案，任何 tau 不过关，连采标签的 strong 重跑钱也省下）
 - 成本/路由漂移可观测：11-04 strong 占比升到 69% 是因为决策模型判 hard 更勤
   （routing fires 8.5% → 25.4%），report/fit 立刻定位，可经 tau 调节
 
@@ -272,13 +275,13 @@ jah fit    ~/.jah/litellm-logs   # 阈值拟合 + 各决策点 describe 表
 1. **strong 层替换为 Kimi K3.1 Pro**：只改 `litellm_config.yaml` 里 `jah-strong` 的模型/端点/凭据
    （及 `jah-config.yaml` 的 `strong` 重跑配置），路由、决策点、日志、计价全部不变——
    这正是"配置即策略"的价值：换模型是配置变更，不是代码变更；替换后用 `jah report`
-   对比 strong 占比、成本与 finish check 触发率
+   对比 strong 占比与成本
 2. **决策模型换成本地部署的 Decision8B**：`decision` 块改为 local 部署
    （`provider: local` + 本地端点 + `price_per_m: 0`），去掉对 maas `decision-model-preview`
    的依赖，决策延迟进一步下降、数据不出内网；注意本地模型的 p(hard) 分布会与线上预览版
    不同——换后重新跑 `jah report` 看 routing fires，必要时重调 tau
-3. stop 攒满 ≥30 条标签后 `jah fit`，目标 tau ≈ 0.70，达标则 fast 终答可省掉 strong 重跑
-4. routing tau 按任务类型评估是否上调到 0.85–0.9（fires 16.7%/11.7%，降本）
+3. **stop 保护重建**：决策模型路径已证伪；若要找回 fast 终答的 strong 复核，只能无条件重跑（stop:strong，~6% 步的全额 strong 调用）——先拿下一步第 5 项的 A/B pass 数据，再决定这笔钱花不花
+4. routing tau 上探 0.85–0.9 仍是降本旋钮（fires 16.7%/11.7%）；用 describe 表持续监控 p(hard) 分布漂移
 5. 与"全 strong 基线"做 A/B：准确率与速度的直接对比数据（当前为日志观测值）
 6. 多副本压测（Redis 会话已就绪，ADR-006）
 
