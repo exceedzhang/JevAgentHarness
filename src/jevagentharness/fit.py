@@ -201,9 +201,11 @@ def table(res: dict[str, Any]) -> str:
     return "\n".join(rows)
 
 
-def snippet(res: dict[str, Any], source: str = "") -> str:
+def snippet(res: dict[str, Any], source: str = "", era_note: str = "") -> str:
     head = (f"# jah fit {source}: target {res['target']:.0%} agreement with the LLM on >= {res['min_count']} "
             f"decisions, z = {res['z']:g} ({date.today().isoformat()})")
+    if era_note:
+        head += f"\n# era filter: {era_note}"
     if res.get("model"):
         head += f"\n# model name: {res['model']} (put this under models: {{{res['model']}: {{decisions: ...}}}})"
     elif len(res.get("model_names") or []) > 1:

@@ -82,31 +82,40 @@ def cmd_setup(a: argparse.Namespace) -> int:
 
 
 def cmd_report(a: argparse.Namespace) -> int:
+    from . import era
     from .report import decisions_table, read_steps, summarize, table
-    s = summarize(read_steps(a.log), by=a.by)
+    e = era.from_args(a)
+    s = summarize(era.apply_steps(read_steps(a.log), e), by=a.by)
+    if e.note():
+        print(f"# era filter: {e.note()}", file=sys.stderr)
     print(json.dumps(s, indent=1) if a.json else table(s))
     d = Path(a.log).expanduser()
     if not a.json and d.is_dir() and (d / "decisions.jsonl").exists():
         from .fit import describe, read_decisions
-        print("\n" + decisions_table(describe(read_decisions(d))))
+        print("\n" + decisions_table(describe(era.apply(read_decisions(d), e))))
     return 0
 
 
 def cmd_fit(a: argparse.Namespace) -> int:
     """Fit each decision point's threshold on logged runs (docs/modes.md, "Fitting thresholds")."""
+    from . import era
     from .fit import fit, read_decisions, snippet, table
     try:
         recs = read_decisions(a.log)
     except FileNotFoundError as e:
         print(str(e), file=sys.stderr)
         return 1
+    e = era.from_args(a)
+    recs = era.apply(recs, e)
+    if e.note():
+        print(f"# era filter: {e.note()}", file=sys.stderr)
     res = fit(recs, target=a.target, min_count=a.min_count, z=a.z, model=a.model)
     if a.json:
         print(json.dumps(res, indent=1))
     else:
         print(table(res))
         print()
-    text = snippet(res, a.log)
+    text = snippet(res, a.log, e.note())
     if not a.json:
         print(text, end="")
     if a.out:
@@ -146,6 +155,20 @@ def cmd_decide(a: argparse.Namespace) -> int:
     return 0
 
 
+def _era_flags(p: argparse.ArgumentParser, decision_alias: str | None = None) -> None:
+    """--since/--decision-model/--calibrated/--truncated: keep one decision era (src/jevagentharness/era.py)."""
+    from . import era
+    names = ["--decision-model", decision_alias] if decision_alias else ["--decision-model"]
+    p.add_argument("--since", type=era.parse_since, metavar="TIME", default=None,
+                   help="keep rows at or after 'YYYY-MM-DD[ HH:MM[:SS]]' (local) or an epoch number")
+    p.add_argument(*names, dest="decision_model", default=None, metavar="NAME",
+                   help="keep rows answered by a decision model whose name contains this (e.g. 4B, preview)")
+    p.add_argument("--calibrated", type=era.parse_bool, default=None, metavar="true|false",
+                   help="keep rows whose probabilities did (true) or did not (false) pass the calibration temperature")
+    p.add_argument("--truncated", type=era.parse_bool, default=None, metavar="true|false",
+                   help="keep rows whose decision state was (true) or was not (false) tail-truncated")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="jah", description="JevAgentHarness: decision-model routing for agent harnesses")
     ap.add_argument("--version", action="version", version=f"jah {__version__}")
@@ -176,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("log", nargs="?", default="~/.jah/logs")
     p.add_argument("--by", default="model_name")
     p.add_argument("--json", action="store_true")
+    _era_flags(p, decision_alias="--model")
     p.set_defaults(fn=cmd_report)
 
     p = sub.add_parser("fit", help="fit the decision points' thresholds on a proxy log (decisions.jsonl)")
@@ -185,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--z", type=float, default=1.645,
                    help="one-sided Wilson bound on the agreement (1.645 ~ 95%%; 0 = the raw rate)")
     p.add_argument("--model", help="fit the records of one model name only")
+    _era_flags(p)
     p.add_argument("--out", help="also write the config snippet to this file")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_fit)
