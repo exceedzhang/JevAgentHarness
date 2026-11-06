@@ -28,7 +28,11 @@ decision:
       "noul:2": 0.4230827372940139
       "choice:17-52": 0.05000000000004328 # unreachable in the plugin (asks never offer > 16 options)
       "choice:3-5": 0.9676007232026532
-tau: 0.75
+# 0.75 was the preview-model fit. On AgentDecision-4B calibrated (era from 2026-11-05 17:01) the p_hard
+# distribution shifted right (median 0.63 -> 0.73): 0.75 fired 47% vs preview's 35%. 0.80 restores the
+# preview-era acting strength (fires ~37%, ~-9% daily cost); 0.85 -> 26% fires / -19% cost if we accept
+# more mid-probability steps on fast without intermediate protection. Quantiles: p50 .725 p60 .785 p70 .835.
+tau: 0.80
 mode: cascade
 on_error: strong
 first_steps_strong: 1
