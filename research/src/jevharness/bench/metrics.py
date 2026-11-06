@@ -38,7 +38,7 @@ NAN = float("nan")
 def episode_table(trajs: Sequence[dict[str, Any]]) -> dict[str, float]:
     """Per-configuration episode means: success (with a percentile-bootstrap 95% CI over episodes), cost
     (total / System-1 / System-2), critical-path latency (sum of call latencies), LLM calls and input
-    tokens, steps, errors, success per dollar, cost-of-pass and latency-of-pass. Success is always reported
+success per dollar, cost-of-pass and latency-of-pass, and the per-episode tails (cost p90/max, latency p99/max) that means hide: one 368-step episode on a 12-task day moves the mean little but empties the budget (docs/adr/ADR-008 D2). Success is always reported
     together with cost and latency (Kapoor et al., 2025, "AI Agents That Matter")."""
     n = len(trajs)
     if n == 0:
@@ -62,6 +62,8 @@ def episode_table(trajs: Sequence[dict[str, Any]]) -> dict[str, float]:
         "llm_input_tokens": float(np.mean(s2in)), "steps": float(np.mean(steps)), "errors": errors,
         "success_per_dollar": float(np.sum(succ) / max(np.sum(cost), 1e-9)),
         "cost_of_pass": cost_of_pass(cost, succ), "latency_of_pass": latency_of_pass([x / 1000 for x in lat], succ),
+        "cost_usd_p90": float(np.percentile(cost, 90)), "cost_usd_max": float(np.max(cost)),
+        "latency_s_p99": float(np.percentile(lat, 99)) / 1000, "latency_s_max": float(np.max(lat)) / 1000,
     }
 
 

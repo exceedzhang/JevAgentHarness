@@ -291,6 +291,12 @@ def decision_block(trajs: Sequence[Mapping[str, Any]], coverage: float = 0.8) ->
     pys, ys = noul_calibration_data(recs)
     if pys:
         out["noul"] = binary_calibration(pys, ys)
+    # S1 decision latency, from measurement fields (``DecisionLog.s1_latency_ms``): the tail is what a
+    # user actually waits on; p50 hides retry storms (ADR-008 D3).
+    slat = [float(r["s1_latency_ms"]) for r in recs if r.get("s1_latency_ms") is not None]
+    if slat:
+        out["s1_lat_ms"] = {"n": len(slat), "p50": float(np.percentile(slat, 50)),
+                            "p99": float(np.percentile(slat, 99)), "max": float(np.max(slat))}
     # memory gates log no DecisionLog (no gold on JevGym): report what the episodes record
     mem = [(t.get("meta") or {}).get("memory") or {} for t in trajs]
     offered = sum(int(m.get("offered", 0) or 0) for m in mem)
@@ -625,6 +631,8 @@ def compute_scorecard(runs: Mapping[str, Sequence[Mapping[str, Any]]], baseline:
             "llm_calls": ep[a].get("llm_calls", NAN), "s1_calls": ep[a].get("s1_calls", NAN),
             "llm_input_tokens": ep[a].get("llm_input_tokens", NAN), "steps": ep[a].get("steps", NAN),
             "errors": ep[a].get("errors", 0),
+            "cost_usd_p90": ep[a].get("cost_usd_p90", NAN), "cost_usd_max": ep[a].get("cost_usd_max", NAN),
+            "latency_s_p99": ep[a].get("latency_s_p99", NAN), "latency_s_max": ep[a].get("latency_s_max", NAN),
             "cost_of_pass": cost_of_pass(list(d["cost"].values()), list(d["success"].values())),
             "latency_of_pass": latency_of_pass(list(d["latency"].values()), list(d["success"].values())),
             "eub": effectiveness_under_budget(costs, succs, budget) if budget else NAN,
@@ -851,6 +859,12 @@ def _p(v: Any) -> str:
     return "<0.001" if v < 0.001 else f"{v:.3f}"
 
 
+def _s1_lat(sl: Mapping[str, Any] | None) -> str:
+    """One table cell for the S1 latency distribution: ``p50/p99/max ms`` (ADR-008 D3)."""
+    if not sl:
+        return "-"
+    return f"{sl['p50']:.0f}/{sl['p99']:.0f}/{sl['max']:.0f}"
+
 def _flags(a: str, r: Mapping[str, Any], card: Mapping[str, Any]) -> str:
     fl = []
     if r.get("pareto"):
@@ -969,6 +983,15 @@ def to_markdown(card: Mapping[str, Any], compact: bool = False) -> str:
     out += ["_cost $: the billed (ledger) cost, the primary figure; cache-mod $: System-2 calls re-priced from their "
             "logged tokens with the measured cached tokens at the model's cached rate; no-cache $: list price with no "
             "cache; cached %: measured cached share of System-2 input tokens (results/pilot_jev/CACHE_NOTES.md)._", ""]
+
+    out += ["### Cost and latency tails", "",
+            "| arm | cost p90 $ | cost max $ | lat p99 s | lat max s |", "|" + "---|" * 5]
+    for a in order:
+        r = arms[a]
+        out.append(f"| {a} | {_f(r.get('cost_usd_p90'), '#.3g')} | {_f(r.get('cost_usd_max'), '#.3g')} | "
+                   f"{_f(r.get('latency_s_p99'), '#.3g')} | {_f(r.get('latency_s_max'), '#.3g')} |")
+    out += ["", "_per-episode p90/max cost and p99/max critical-path latency: the mean hides the fat tail "
+            "(ADR-008 D2)._", ""]
     out += _ni_markdown(card, order)
     # pass^k
     pk = {a: r["pass_hat_k"] for a, r in arms.items() if r.get("pass_hat_k")}
@@ -983,11 +1006,11 @@ def to_markdown(card: Mapping[str, Any], compact: bool = False) -> str:
     # decisions
     dcols = ["n scored", "S1 acc", "ECE", "ACE", "Brier", "AUROC", "AURC", "E-AURC", "acc@80%cov", "harmful %",
              "guard FAR", "guard FRR", "rescue %", "yes/no n", "yes/no ECE", "yes/no Brier", "yes/no AUROC",
-             "mem stored %"]
+             "mem stored %", "S1 lat p50/p99/max ms"]
     rows = []
     for a in order:
         d = arms[a].get("decisions") or {}
-        if not (d.get("n_s1_scored") or d.get("harmful") or d.get("guard") or d.get("noul")
+        if not (d.get("n_s1_scored") or d.get("harmful") or d.get("guard") or d.get("noul") or d.get("s1_lat_ms")
                 or d.get("memory_stored_frac") is not None):
             continue
         g = (d.get("guard") or {}).get("all") or {}
@@ -999,7 +1022,7 @@ def to_markdown(card: Mapping[str, Any], compact: bool = False) -> str:
             _f(d.get("sel_acc@80"), ".3f"), _f((d.get("harmful") or {}).get("harmful_rate"), ".1f", pct=True),
             _f(g.get("far"), ".3f"), _f(g.get("frr"), ".3f"), _f(rs.get("rescue_rate"), ".1f", pct=True),
             str(nl.get("n", 0)), _f(nl.get("ece"), ".3f"), _f(nl.get("brier"), ".3f"), _f(nl.get("auroc"), ".3f"),
-            _f(d.get("memory_stored_frac"), ".1f", pct=True)]) + " |")
+            _f(d.get("memory_stored_frac"), ".1f", pct=True), _s1_lat(d.get("s1_lat_ms"))]) + " |")
     if rows:
         out += ["### System-1 decisions", "", "| arm | " + " | ".join(dcols) + " |", "|" + "---|" * (len(dcols) + 1),
                 *rows, "", "_Calibration over System-1 Choice decisions with gold labels (top-label confidence); "

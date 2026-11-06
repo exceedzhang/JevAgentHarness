@@ -651,3 +651,29 @@ def test_h5_one_timeout_cannot_flip_the_verdict():
             assert v["success_preserving_and_faster"], (i, j, v)   # the registered verdict (A6.6, A6.16 (j))
             assert v["d_success"] == approx(ref["d_success"] - 1 / 60)
             assert v["wins"] >= v["losses"] and v["d_success_lb"] > -0.05
+
+
+# ======================================================================= tails (ADR-008 D2/D3)
+def test_episode_table_reports_the_tail():
+    trajs = []
+    for i in range(1, 21):
+        t = _traj(f"t{i}", ok=i % 4 == 0, cost=float(i) / 20.0)
+        t["usage"]["total"]["latency_ms"] = 1000.0 * i
+        trajs.append(t)
+    row = M.episode_table(trajs)
+    assert row["cost_usd_p90"] == approx(0.905) and row["cost_usd_max"] == approx(1.0)
+    assert row["latency_s_p99"] == approx(19.81) and row["latency_s_max"] == approx(20.0)
+
+
+def test_decision_block_s1_latency_distribution():
+    from jevharness.bench.scorecard import decision_block
+
+    traj = {"task_id": "t1", "config": "a", "result": {"success": True}, "meta": {}, "usage": {},
+            "steps": [{"step": 0, "tool": None, "args": {}, "observation": "",
+                       "decisions": [{"dp": "routing", "mode": "cascade", "question": "hard?", "deferred": False,
+                                      "s1_latency_ms": 15.0},
+                                     {"dp": "routing", "mode": "cascade", "question": "hard?", "deferred": True,
+                                      "s1_latency_ms": 200.0}]}]}
+    d = decision_block([traj])
+    assert d["s1_lat_ms"]["n"] == 2 and d["s1_lat_ms"]["max"] == approx(200.0)
+    assert d["s1_lat_ms"]["p50"] == approx(107.5)
