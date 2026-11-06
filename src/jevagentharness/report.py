@@ -70,8 +70,12 @@ def table(summary: dict[str, dict[str, Any]]) -> str:
 
 def decisions_table(described: dict[str, dict[str, Any]]) -> str:
     """Decision calls per point and mode (from decisions.jsonl, via fit.describe)."""
-    rows = ["| decision point:mode | calls | errors | acted | p50 latency s | cost $ |", "|---|---|---|---|---|---|"]
+    rows = ["| decision point:mode | calls | errors | acted | p50/p99/max lat s | cost $ |",
+            "|---|---|---|---|---|---|"]
     for g, d in described.items():
-        lat = "-" if d["latency_p50_s"] is None else round(d["latency_p50_s"], 3)
+        if d["latency_p50_s"] is None:
+            lat = "-"
+        else:
+            lat = f"{d['latency_p50_s']:.3f}/{d['latency_p99_s']:.3f}/{d['latency_max_s']:.3f}"
         rows.append(f"| {g} | {d['calls']} | {d['errors']} | {d['acted']} | {lat} | {d['cost_usd']} |")
     return "\n".join(rows)

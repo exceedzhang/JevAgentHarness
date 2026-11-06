@@ -163,6 +163,8 @@ def describe(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         d = {"calls": len(rs), "errors": len(rs) - len(ok), "acted": sum(1 for r in rs if r.get("acted")),
              "would_fire_at_logged_tau": round(len(fire) / len(ok), 4) if ok and rs[0].get("act_option") else None,
              "latency_p50_s": lat[len(lat) // 2] if lat else None,
+             "latency_p99_s": lat[min(len(lat) - 1, round(0.99 * (len(lat) - 1)))] if lat else None,
+             "latency_max_s": lat[-1] if lat else None,
              "cost_usd": round(sum(float(r.get("cost_usd") or 0) for r in rs), 6)}
         rechecks = [r for r in rs if r.get("recheck")]
         if rechecks:

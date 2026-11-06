@@ -147,3 +147,13 @@ def test_shadow_run_then_fit_end_to_end(run, tmp_path, capsys):
     assert "tool_select: {tau: 0.98}" in printed
     assert main(["report", str(tmp_path)]) == 0
     assert "| tool_select:shadow |" in capsys.readouterr().out
+
+
+def test_describe_reports_the_latency_tail():
+    recs = [tool_rec(0.9, True, latency_s=0.1 * i) for i in range(1, 11)]  # 0.1 s .. 1.0 s
+    d = F.describe(recs)["tool_select:shadow"]
+    assert round(d["latency_p50_s"], 3) == 0.6
+    assert d["latency_p99_s"] == 1.0 and d["latency_max_s"] == 1.0
+    from jevagentharness import report as R
+
+    assert "0.600/1.000/1.000" in R.decisions_table(F.describe(recs))
