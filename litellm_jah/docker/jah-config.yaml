@@ -71,4 +71,6 @@ strong_api_base: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1
 currency: CNY
 prices:
   deepseek-v4.1-flash: {input: 2, output: 8, cached_input: 0.2}
-  qwen3.8-flash: {input: 0.8, output: 2.7, cached_input: 0.1, cache_write: 1.25}
+  qwen3.8-flash: {input: 0.8, output: 2.7, cached_input: 0.1, cache_write: 1.25} # the pre-11-07 fast tier (history re-fit)
+  # self-hosted on the GPU box: no per-token bill, booked at zero so step rows stay priced
+  "Qwen/Qwen3.8-27B": {input: 0, output: 0, cached_input: 0}

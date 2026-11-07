@@ -181,7 +181,7 @@
 | `first_steps_strong` | 开局强制 strong 步数 | 1 |
 | `on_error` | 决策失败时走哪层 | strong |
 | `strong` + `strong_api_key/base` | 重跑模型与凭据 | deepseek-v4.1-flash（`os.environ/…`，key 不进配置文件） |
-| `currency` / `prices` | 计费币种与每百万 token 价（input/output/cached_input/cache_write） | CNY：deepseek-v4.1-flash 2/8/0.2；qwen3.8-flash 0.8/2.7/0.1/1.25 |
+| `currency` / `prices` | 计费币种与每百万 token 价（input/output/cached_input/cache_write） | CNY：deepseek-v4.1-flash 2/8/0.2；Qwen/Qwen3.8-27B 0/0（11-07 起 fast 层，自托管零计费）；qwen3.8-flash 0.8/2.7/0.1/1.25（历史回算用） |
 | `decision.price_per_m` | 决策模型计价 | 0（输入免费） |
 | `session_store` | 多副本会话共享 | redis://jah-redis:6379/0 |
 | `log_dir` | journal 输出 | ~/.jah/litellm-logs |
@@ -219,6 +219,27 @@ jah fit    ~/.jah/litellm-logs   # 阈值拟合 + 各决策点 describe 表
 
 建议图：按日堆叠柱状图（fast vs strong 步数）+ 成本曲线
 （11-01 13 步 → 11-02 204 → 11-03 779 → 11-04 150）。
+
+## S15b 实验数据：fast 层切换本地 Qwen3.8-27B（11-07）与成本测算
+
+变更：fast 层由 maas `qwen3.8-flash` 换为自托管 `Qwen/Qwen3.8-27B`（与 4B 决策模型同服、
+同一 ssh 隧道；工具调用实测通过，单步 ~1.4 s，计价条目 0）。
+切换只动 `litellm_config.yaml` 一处 + 计价表加一条——harness 与路由代码零改动。
+
+**成本测算**（校准 era 实测，32 会话 / ¥89.75）：
+
+| 层 | 调用数 | 成本 | 占比 | 切换后 |
+|---|---|---|---|---|
+| fast（原 qwen3.8-flash @maas） | 1040 | ¥30.79 | **34.3%** | **0**（自托管） |
+| strong（deepseek-v4.1-flash @maas） | 879 | ¥58.96 | 65.7% | 不变 |
+| 决策模型（4B 本地） | 3500+ | 0 | 0% | 不变 |
+| **合计 / 会话** | | **¥2.80** | | **≈¥1.84（−34%）** |
+
+- 按近期 ~11 会话/天 ≈ 省 ¥10/天；按 11-03 的 45 会话/天负载 ≈ 省 ¥40/天
+- **降幅下限在 strong**：路由按 p_hard≥0.80 判层、与价格无关，strong 的 65.7% 不受本次切换影响；
+  再降只能动 tau（0.85→−9%、0.9→−19% 的强判比例，代价见 S16 routing 条）
+- 未计入：本地 GPU 成本——27B 与决策模型共卡，是成本转移（账单→算力）而非消失；
+  高峰观察 `jah report --calibrated true` 的延迟 p99 决定是否给 27B 单独开卡
 
 ## S16 实验数据：决策点与 fit 结果
 

@@ -27,15 +27,18 @@ model_list:
     max_output_tokens: 393216 # max output 393K
 - model_name: jah-fast
   litellm_params:
-    model: openai/qwen3.8-flash
-    api_key: os.environ/DASHSCOPE_API_KEY
-    api_base: https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1
-    max_tokens: 131072 # model max output 131K (2^17); default when the client sends none
+    # self-hosted on the GPU box, same server as the decision model, reached through
+    # the existing ssh tunnel (probe 2026-11-07: tool calls + usage work; /v1/models
+    # advertises max input/output 262144)
+    model: openai/Qwen/Qwen3.8-27B
+    api_key: os.environ/DECISION_API_KEY # tunnel-local key, same server as the decision model
+    api_base: http://ssh-tunnel:8000/v1
+    max_tokens: 131072 # keep the current client default (2^17); the model itself allows 262144
   # real model limits: with LITELLM_MODIFY_PARAMS=true the proxy clamps a client
-  # max_tokens above 131072 down to it (prompts are never truncated)
+  # max_tokens above 262144 down to it (prompts are never truncated)
   model_info:
-    max_input_tokens: 1014784 # vendor max input 991K (991 x 1024); the 1M figure is the context window
-    max_output_tokens: 131072 # max output 131K (2^17)
+    max_input_tokens: 262144 # advertised by the server's /v1/models
+    max_output_tokens: 262144
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY  # generated at startup if unset (see docker/jah_entrypoint.sh)
