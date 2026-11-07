@@ -39,16 +39,20 @@ first_steps_strong: 1
 strong_label: COMPLEX
 fast_label: SIMPLE
 log_dir: ~/.jah/litellm-logs
+# the decision rows then also carry the exact state string sent to the decision model: point + state +
+# question + options is a complete prompt, and `python -m jevharness.training.data_v2` turns the labelled
+# rows into GRPO/SFT training data (see research/docs/DECISION_DATA_V2.md)
+log_decision_state: true
 model_name: jah-auto
 # Decision points. Both label-collecting points are off on evidence from `jah fit` (see each comment);
 # routing stays in cascade mode with the tau below, and the strong-tier re-run credentials stay configured
 # for any future guard/strong mode. Nothing is collected for `jah fit` right now: switch a point back to
 # {mode: "shadow"} to restart labelling (quoted strings only - YAML 1.1 reads a bare off/on as booleans).
 decisions:
-  # tool_select is off on purpose: fitted on 344 labelled decisions, no tau reached the 95%
-  # agreement target (best 18%); the model predicts "reply without tool" on 77% of steps where
-  # the agent calls one, so acting on it would suppress tool use. Revisit only with a new model.
-  tool_select: {mode: "off"}
+  # tool_select: back in shadow for GRPO training-data collection (the state is now logged, so labelled rows
+  # become training examples - research/docs/DECISION_DATA_V2.md). The fit verdict stands: no tau reached the
+  # 95% agreement target, so the point must stay out of guard/trigger mode; shadow only labels.
+  tool_select: {mode: "shadow"}
   # stop is off on purpose: on AgentDecision-4B calibrated (81 labelled decisions) it agrees with the strong
   # verdict on 61.7% of final replies and no tau reached the 95% target - and in shadow the strong redo's reply
   # was discarded anyway, so the mode bought labels, not protection, at the price of one strong call on every

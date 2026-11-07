@@ -43,7 +43,7 @@ class JAHRouter:
         self.backend = backend if backend is not None else make_backend(self.cfg.decision)
         self.store = store or make_store(self.cfg)
         self.journal = journal or (Journal(self.cfg.log_dir) if self.cfg.log_dir else None)
-        self.asker = Asker(self.backend)
+        self.asker = Asker(self.backend, log_state=self.cfg.log_decision_state)
         self.points = self.cfg.points
         self._filters: dict[Any, ActionFilter] = {}
         if self.cfg.prices:
@@ -184,7 +184,8 @@ class JAHRouter:
             sess.decided.pop(old, None)
         if asked and self.journal is not None:
             try:
-                await self.journal.decision(self._routing_row(key, step, decision, p_hard, reason))
+                sent = d.state if (c.log_decision_state and p_hard is not None) else None
+                await self.journal.decision(self._routing_row(key, step, decision, p_hard, reason, state=sent))
             except Exception: # noqa: BLE001 - logging must never break routing
                 pass
         if os.environ.get("JAH_DEBUG"):
@@ -193,7 +194,7 @@ class JAHRouter:
         return RouteResult(session=key, step=step, tier=tier, reason=reason, p_hard=p_hard, decision=decision)
 
     def _routing_row(self, key: str, step: int, decision: dict[str, Any] | None, p_hard: float | None,
-                     reason: str) -> dict[str, Any]:
+                     reason: str, state: str | None = None) -> dict[str, Any]:
         """One row of decisions.jsonl for the routing decision point, in the standalone proxy's
         ``Ask.record()`` shape (with the head ``jah report`` / ``jah fit`` expect)."""
         d = decision or {}
@@ -202,7 +203,7 @@ class JAHRouter:
             p = {"routine": round(1.0 - p_hard, 4), HARD: round(p_hard, 4)}
         top = sorted(p.items(), key=lambda kv: -kv[1])[:10]
         choice = max(p, key=lambda k: p[k]) if p else None
-        return {
+        row = {
             **head(key, self.cfg.model_name, step),
             "point": "routing", "mode": self.points.routing.mode, "question": QUESTION.id,
             "n_options": len(QUESTION.options), "options": list(QUESTION.options),
@@ -215,3 +216,6 @@ class JAHRouter:
             "rounds": 1, "calibrated": d.get("calibrated") if p else None,
             "truncated": d.get("truncated") if p else None, "error": d.get("error"),
         }
+        if state is not None:
+            row["state"] = state
+        return row

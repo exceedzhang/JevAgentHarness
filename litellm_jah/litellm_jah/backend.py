@@ -62,6 +62,8 @@ class Decision:
     why: str = ""
     calibrated: bool = False  # p lives in the model card's calibrated space (JevBackend.calibration applied)
     truncated: bool = False  # the state was cut to its tail before sending (JevBackend.max_state_tokens)
+    state: str | None = None  # the exact state string sent to the server (after the tail cut), when the backend
+    # kept it - logged with the decision row only when config log_decision_state is on
 
     @property
     def choice(self) -> str:
@@ -207,7 +209,7 @@ class JevBackend(DecisionBackend):
                     text = await r.text()
                     if r.status == 200:
                         data = json.loads(text)
-                        return self._parse(data, q, time.monotonic() - t0, truncated=truncated)
+                        return self._parse(data, q, time.monotonic() - t0, truncated=truncated, state=state)
                     last = f"HTTP {r.status}: {text[:200]}"
                     if r.status not in RETRY_STATUS:
                         break
@@ -218,7 +220,8 @@ class JevBackend(DecisionBackend):
                 delay *= 2
         raise RuntimeError(f"decision model failed: {last}")
 
-    def _parse(self, data: Mapping[str, Any], q: Question, latency: float, truncated: bool = False) -> Decision:
+    def _parse(self, data: Mapping[str, Any], q: Question, latency: float, truncated: bool = False,
+               state: str | None = None) -> Decision:
         a = (data.get("answers") or {}).get(q.id) or {}
         probs = a.get("probabilities") or ({a["choice"]: 1.0} if "choice" in a else {})
         p = {o: float(probs.get(o, 0.0)) for o in q.options}
@@ -238,7 +241,7 @@ class JevBackend(DecisionBackend):
         tokens = int(u.get("input_tokens") or 0)
         cost = float(u["cost"]) if isinstance(u.get("cost"), (int, float)) else tokens * self.price_per_m / 1e6
         return Decision(p=p, model=str(data.get("model") or self.model), cost_usd=cost, latency_s=latency,
-                        input_tokens=tokens, calibrated=calibrated, truncated=truncated)
+                        input_tokens=tokens, calibrated=calibrated, truncated=truncated, state=state)
 
     async def close(self) -> None:
         if self._session is not None:

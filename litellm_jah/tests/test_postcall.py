@@ -786,3 +786,53 @@ def test_a_reasked_step_writes_one_decision_row(run):
             await engine.close()
 
     run(main())
+
+
+class Stateful:
+    """A backend wrapper that records the state string exactly as sent (JevBackend sets Decision.state
+    to the post-truncation string; this stands in for that)."""
+
+    name = "stateful"
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def decide(self, state: str, q, view=None):
+        d = await self.inner.decide(state, q, view)
+        d.state = state
+        return d
+
+    async def close(self):
+        await self.inner.close()
+
+
+def test_decision_rows_carry_the_state_only_when_enabled(run):
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            # off (the default): the row keeps today's shape
+            engine, _ = make_engine({"next_tool": lambda q: answer(q, "bash", 0.9)},
+                                    {"tool_select": {"mode": "shadow"}}, log_dir=tmp)
+            m = msgs(2)
+            await engine.decide(m, {"session_id": "s1"})
+            await JahPreCall(engine=engine).async_pre_call_hook(None, None, rd(m, model="jah-auto"), "completion")
+            await hook(engine).stream_label(rd(m), resp(tool_calls=[tool()]))
+            rows = [r for r in decision_rows(tmp) if r["point"] == "tool_select"]
+            assert rows and "state" not in rows[0]
+            await engine.close()
+
+            # on: the row carries the exact state string the decision model saw
+            Path(tmp, "decisions.jsonl").unlink()
+            _, inner = make_engine({"next_tool": lambda q: answer(q, "bash", 0.9)},
+                                   {"tool_select": {"mode": "shadow"}})
+            cfg = JAHCfg(decisions={"tool_select": {"mode": "shadow"}}, log_dir=tmp,
+                         log_decision_state=True, strong="g-strong")
+            engine2 = JAHRouter(cfg, backend=Stateful(inner))
+            m2 = msgs(2)
+            await engine2.decide(m2, {"session_id": "s1"})
+            await JahPreCall(engine=engine2).async_pre_call_hook(None, None, rd(m2, model="jah-auto"), "completion")
+            await hook(engine2).stream_label(rd(m2), resp(tool_calls=[tool()]))
+            rows2 = [r for r in decision_rows(tmp) if r["point"] == "tool_select"]
+            assert rows2 and isinstance(rows2[0].get("state"), str) and rows2[0]["state"]
+            await engine2.close()
+
+    run(main())

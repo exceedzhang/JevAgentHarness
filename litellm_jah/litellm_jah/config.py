@@ -49,6 +49,10 @@ DEFAULTS: dict[str, Any] = {
     "session_store": None,
     # logging in the JAH schema (steps.jsonl / decisions.jsonl), readable by `jah report` / `jah fit`
     "log_dir": None,
+    # when on, successful decision rows also carry the exact state string sent to the decision model
+    # (post-truncation): the decision point + state + question + options is then a complete prompt for
+    # training-data harvests (the GRPO datasets are built from these rows)
+    "log_decision_state": False,
     "model_name": "jah-auto",
     # the remaining decision points (tool select, stop, reflection, action): a preset and/or a decisions block
     "preset": None, # route | paper | safe | shadow
@@ -83,6 +87,7 @@ class JAHCfg:
     session_ttl_s: float = DEFAULTS["session_ttl_s"]
     session_store: dict[str, Any] | None = None
     log_dir: str | None = None
+    log_decision_state: bool = False
     model_name: str = DEFAULTS["model_name"]
     currency: str = DEFAULTS["currency"]
     preset: str | None = None
@@ -137,6 +142,8 @@ class JAHCfg:
             raise ValueError("model_name must be a non-empty string")
         if not isinstance(c.currency, str) or not c.currency.strip():
             raise ValueError("currency must be a non-empty string")
+        if not isinstance(c.log_decision_state, bool):
+            raise ValueError("log_decision_state must be a boolean")
         if c.prices is not None and (not isinstance(c.prices, Mapping) or not c.prices):
             raise ValueError("prices must be a non-empty mapping of model -> {input, output, ...}")
         for m, spec in (c.prices or {}).items():

@@ -523,6 +523,8 @@ class Ask:
     model: str = ""
     calibrated: bool = False  # p is in the model card's calibrated space (backend.py applies its temperatures)
     truncated: bool = False  # the state was sent as a tail cut to max_state_chars (backend.py)
+    state: str | None = None  # the exact state string sent (backend-provided, post-truncation); logged to the
+    # decision row only when the config enables it - the GRPO training data is built from these rows
     cost_usd: float = 0.0
     latency_s: float = 0.0
     rounds: int = 1
@@ -563,6 +565,8 @@ class Ask:
             "calibrated": self.calibrated if self.p else None,
             "truncated": self.truncated if self.p else None,
             "error": self.error}
+        if self.state is not None:
+            rec["state"] = self.state
         rec.update(self.extra)
         return rec
 
@@ -571,8 +575,11 @@ class Asker:
     """Asks the decision model one question with a time limit and turns any failure into an ``Ask`` with
     ``error``."""
 
-    def __init__(self, backend: DecisionBackend) -> None:
+    def __init__(self, backend: DecisionBackend, log_state: bool = False) -> None:
         self.backend = backend
+        # when on, each successful Ask keeps the exact state string sent to the server so the journal row
+        # (decision point + state + question) is a complete prompt for training-data harvests
+        self.log_state = log_state
 
     async def _decide(self, state: str, q: Question, timeout: float, view: StepView | None) -> Any:
         if isinstance(self.backend, RulesBackend):
@@ -594,6 +601,8 @@ class Asker:
         except Exception as e: # noqa: BLE001 - a decision-model failure falls back to the LLM-only behaviour
             a.error = f"{type(e).__name__}: {str(e)[:200]}"
             a.p = {}
+        if self.log_state and a.p:
+            a.state = getattr(d, "state", None)
         a.latency_s = time.monotonic() - t0
         return a
 
