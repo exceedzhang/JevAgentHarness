@@ -52,7 +52,9 @@ decisions:
   # tool_select: back in shadow for GRPO training-data collection (the state is now logged, so labelled rows
   # become training examples - research/docs/DECISION_DATA_V2.md). The fit verdict stands: no tau reached the
   # 95% agreement target, so the point must stay out of guard/trigger mode; shadow only labels.
-  tool_select: {mode: "shadow"}
+  # max_options: the AgentDecision-4B card caps next_tool at 26 options (HTTP 400 above); 27/53-tool sessions
+  # produced 72 such errors on 11-07/08, so the knockout (two-round chunked ask) kicks in from 27 tools up.
+  tool_select: {mode: "shadow", max_options: 26}
   # stop is off on purpose: on AgentDecision-4B calibrated (81 labelled decisions) it agrees with the strong
   # verdict on 61.7% of final replies and no tau reached the 95% target - and in shadow the strong redo's reply
   # was discarded anyway, so the mode bought labels, not protection, at the price of one strong call on every
