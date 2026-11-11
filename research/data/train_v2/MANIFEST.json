@@ -1,0 +1,57 @@
+{
+ "built": "/Users/exceed/.jah/litellm-logs/decisions.jsonl",
+ "seed": 0,
+ "dev_frac": 0.1,
+ "n_in": 3651,
+ "n_out": 1576,
+ "skipped": {
+  "point_unlabelled": 1998,
+  "no_state": 2,
+  "error_row": 72,
+  "unlabelled_or_not_fit_ok": 3
+ },
+ "by_point": {
+  "tool_select": 1576
+ },
+ "stats_train": {
+  "n": 1539,
+  "tasks": 34,
+  "by_source": {
+   "production": 1539
+  },
+  "by_dp": {
+   "tool_select": 1539
+  },
+  "by_kind": {
+   "choice": 1539
+  },
+  "by_options": {
+   "6-16": 1509,
+   "2": 2,
+   "17-52": 28
+  },
+  "soft_frac": 0.0,
+  "target_entropy_mean": 0.0,
+  "with_q_values": 0
+ },
+ "stats_dev": {
+  "n": 37,
+  "tasks": 3,
+  "by_source": {
+   "production": 37
+  },
+  "by_dp": {
+   "tool_select": 37
+  },
+  "by_kind": {
+   "choice": 37
+  },
+  "by_options": {
+   "6-16": 28,
+   "17-52": 9
+  },
+  "soft_frac": 0.0,
+  "target_entropy_mean": 0.0,
+  "with_q_values": 0
+ }
+}
