@@ -1,6 +1,6 @@
 # litellm-jah 插件功能介绍 — PPT 大纲
 
-> 建议篇幅：19 页左右（含 S5b 对比页）。所有数据来自真实运行日志（`~/.jah/litellm-logs`，截至 2026-11-04），
+> 建议篇幅：19 页左右（含 S5b 对比页）。所有数据来自真实运行日志（`~/.jah/litellm-logs`，截至 2026-11-11），
 > 由 `jah report` / `jah fit` 统计，未做任何虚构或修饰。
 
 ---
@@ -39,8 +39,8 @@
 | ③ 不降任务准确率 | hard 步强制 strong + on_error=strong（决策层故障兜底）；finish check / guard 复核为可选机制，按 fit 数据决定开关（见 S16） |
 | ④ 提高执行速度 | fast 层处理占多数的 routine 步骤；决策开销仅 ~0.2 s/步（单步 LLM 延迟 ~12 s 量级） |
 
-> 讲稿提示：④的"提速"来自 fast 层模型本身更快；当前日志记录每步 LLM 延迟
-> （115.3 s/会话），与"全 strong 基线"的直接 A/B 对比是下一步工作，PPT 中如实表述。
+> 讲稿提示：④的“提速”来自 fast 层模型本身更快；当前日志记录 LLM 延迟
+> （398.4 s/会话，11-11，含超长会话），与“全 strong 基线”的直接 A/B 对比是下一步工作，PPT 中如实表述。
 
 ## S5 总体架构（一张图）
 
@@ -87,7 +87,7 @@
 
 - 每一步都问一次决策模型：`p(hard)`
   - 前 N 步（`first_steps_strong`）强制 strong——开局规划最贵
-  - `p(hard) ≥ tau`（当前 0.75）→ strong 层
+  - `p(hard) ≥ tau`（当前 0.80）→ strong 层
   - 否则 → fast 层
   - 升级后粘滞（stick）、fast 连续上限（max_fast_streak）防止"刚升级又跳回"
 - 四种 routing 模式：`cascade`（默认）/ `shadow`（只记录，全 strong）/
@@ -105,7 +105,8 @@
   - **action**：拟执行的动作是否危险？
 - 统一语义：**fast 层产出 + strong 层复核**，只有复核不过才重跑（一次）；
   重跑失败则保留原回复——hook 永远不破坏已完成的请求（fail-safe）
-- 本部署当前开启：routing=cascade（tau 0.80）+ on_error=strong；stop 与 tool_select 都经两轮 fit 验证后关闭（见 S16）
+- 本部署当前开启：routing=cascade（tau 0.80）+ on_error=strong；stop 经两轮 fit 验证后关闭，
+  tool_select 行动模式关闭、shadow 保留作训练采标（见 S16）
 
 ## S8 原理三：shadow → fit → promote 自校准闭环
 
@@ -177,7 +178,7 @@
 |---|---|---|
 | `decision` | 决策后端 | `{type: jev, provider: local, model: decision-model-preview}` |
 | `tau` | p(hard) ≥ tau 升级 strong | 0.80（11-05 按校准 4B 分布上调） |
-| `mode` / `decisions.*` | routing 及五决策点模式 | routing=cascade；stop="off"；tool_select="off"（注意 YAML 1.1：裸 off 是布尔，要加引号） |
+| `mode` / `decisions.*` | routing 及五决策点模式 | routing=cascade；stop="off"；tool_select="shadow"+max_options 26（行动模式关闭，shadow 仅供训练采标；注意 YAML 1.1：裸 off 是布尔，要加引号） |
 | `first_steps_strong` | 开局强制 strong 步数 | 1 |
 | `on_error` | 决策失败时走哪层 | strong |
 | `strong` + `strong_api_key/base` | 重跑模型与凭据 | deepseek-v4.1-flash（`os.environ/…`，key 不进配置文件） |
@@ -195,30 +196,44 @@ jah fit    ~/.jah/litellm-logs   # 阈值拟合 + 各决策点 describe 表
 
 - 日常：看 `jah report` 的 strong 占比与成本趋势，判断负载是否变化
 - 调阈值：某点 shadow 标签 ≥ 30 条 → `jah fit` → 有 tau 达 95% 才 promote，否则保持/关闭
-- 本部署节奏示例：tool_select 标签 54 → 344 条、两轮 fit 结论一致（不可用）→ 关；
+- 本部署节奏示例：tool_select 标签 54 → 344 → 1932 条、三轮 fit 结论一致（不可用）→
+  行动模式关闭（11-08 起 shadow 复开，只为给决策模型生产训练数据）；
   stop 14 条时 tau 0.70 全对（但下界不过关）→ 继续攒到 81 条 → 第二轮 fit 证伪 → 关——
   ≥30 样本 + Wilson 下界的门槛就是为拦住小样本假信号设的
 
-## S15 实验数据：总览（截至 11-04，真实日志）
+## S15 实验数据：总览（截至 11-11，真实日志）
 
 `jah report`：
 
 | 指标 | 值 |
 |---|---|
-| 会话数 | 152 |
-| 步数/会话 | 7.5 |
+| 会话数 | 247 |
+| 步数/会话 | 25.4 |
 | strong 占比 | 37%（fast 63%） |
-| 成本/会话 | ¥0.1649 |
-| LLM 延迟/会话 | 115.3 s |
-| 错误 | 11（全部已定位，见 S17，11-04 零新增） |
+| 成本/会话 | ¥0.75 |
+| LLM 延迟/会话 | 398.4 s |
+| 错误 | 24（全部已定位，见 S17；11-11 零新增） |
 
-最近 24 小时（869 步 / 45 会话）：
+分日（fast/strong 步数、成本）：
 
-- fast 636 / strong 233；步骤原因：routine 636、hard 176、first_steps 49、finish_check 8
-- 成本 ¥20.91；输入缓存命中率 95%（缓存价仅为普通输入的 1/10～1/20）
+| 日期 | 步数 | 会话 | fast / strong | 错误 | 成本 |
+|---|---|---|---|---|---|
+| 11-01 | 13 | 11 | 0 / 13 | 0 | —（计价前） |
+| 11-02 | 204 | 89 | 127 / 77 | 8 | — |
+| 11-03 | 779 | 43 | 545 / 234 | 3 | ¥21.24 |
+| 11-04 | 726 | 28 | 400 / 326 | 0 | ¥31.94 |
+| 11-05 | 605 | 21 | 365 / 240 | 0 | ¥19.86 |
+| 11-06 | 1430 | 17 | 667 / 763 | 0 | ¥82.50 |
+| 11-07 | 634 | 15 | 532 / 102 | 8 | ¥7.75 |
+| 11-08 | 176 | 17 | 129 / 47 | 0 | ¥0.93 |
+| 11-09 | 386 | 18 | 272 / 114 | 3 | ¥3.31 |
+| 11-10 | 1229 | 1 | 848 / 381 | 2 | ¥17.47 |
+| 11-11 | 101 | 6 | 87 / 14 | 0 | ¥0.26 |
 
-建议图：按日堆叠柱状图（fast vs strong 步数）+ 成本曲线
-（11-01 13 步 → 11-02 204 → 11-03 779 → 11-04 150）。
+- 最近 24 小时（11-11 起）：327 步 / 7 会话，fast 234 / strong 93，¥4.89
+- 两个尖峰说明负载差异大：11-06 strong 占比 53%（长任务日）；11-10 是**单个超长会话**
+  （1229 步、¥17.47）——按会话看成本比全局均值更有意义
+- 建议图：按日堆叠柱状图（fast vs strong 步数）+ 成本曲线
 
 ## S15b 实验数据：fast 层切换本地 Qwen3.8-27B（11-07）与成本测算（11-08 实测）
 
@@ -265,27 +280,30 @@ jah fit    ~/.jah/litellm-logs   # 阈值拟合 + 各决策点 describe 表
 
 | 决策点:模式 | calls | 错误 | p50 延迟 |
 |---|---|---|---|
-| routing:cascade | 1033 | 0 | 0.195 s |
-| stop:shadow（11-05 已关） | 19（14 带标签，最终累计 81 条） | 0 | 0.193 s |
-| tool_select:shadow（已关） | 694（350 带标签） | 4（旧遗留） | 0.259 s |
+| routing:cascade | 5438 | 6 | 0.234 s |
+| stop:shadow（11-05 已关，行均为历史 shadow 期） | 154 | 1 | 0.236 s |
+| tool_select:shadow（11-08 复开，仅供训练采标） | 2363 | 76（全为 26 选项上限，已修） | 0.239 s |
 
 `jah fit`（目标：与 LLM 一致率 ≥ 95%，Wilson 下界，≥30 样本）：
 
-- **tool_select：负结论**——344 条标签，原始一致率仅 **13.4%**，任何 tau 都达不到 95%
-  （最好 18% @ tau 0.32）。根因：模型 77% 的步预测"不调工具"，而 agent 实际 88% 的步调工具
-  （reply_without_tool→bash 111 条等）。若当时直接上 guard，约 3/4 步骤会被错误地压成
-  "直接回答"。**shadow 机制在 promote 前拦截了这个坏配置** → 已设 `mode: "off"`，
-  省掉每步 ~0.26 s 决策延迟
-- **stop：负结论（11-05 定案）**——第一轮 14 条标签时 tau 0.70 全对（11/11）但 Wilson 下界
-  80.3% 不过关；攒到 81 条重拟合，总体一致率仅 **61.7%**，任何 tau 达不到 95%。且 shadow 的重跑
-  回复本就丢弃（只采标签、不提供保护），代价是每次 fast 终答（~6% 步）一次全上下文 strong 调用
-  + ~0.24 s → `mode: "off"`。小样本假信号被门槛拦住，正是闭环设计的证明
-- **routing：无标签可拟合**（strong 层怎么答未知），只有 tau 一个旋钮：fires 25.4%@0.75、
-  16.7%@0.85、11.7%@0.9。11-05 校准 4B 的 p(hard) 分布右移（strong 一度到 69%），tau 上调至 0.80
+- **tool_select：负结论（三轮拟合一致）**——344 → 1932 条标签，原始一致率 13.4% → **14.8%**，
+  任何 tau 都达不到 95%。根因：模型 ~77% 的步预测“不调工具”，而 agent 实际 ~88% 的步调工具
+  （混淆 top：reply_without_tool→shell 459 / read 229 / edit 212 / bash 117 条）。若上 guard，
+  约 3/4 步骤会被错误地压成“直接回答”。**shadow 机制在 promote 前拦截了这个坏配置** →
+  行动模式保持 off；11-08 起重新以 shadow 跑**只为给决策模型生产训练数据**
+  （`research/data/train_v2` 首版 1,576 条）
+- **stop：负结论（11-05 定案，11-11 复核仍不通过）**——第一轮 14 条标签时 tau 0.70 全对（11/11）
+  但 Wilson 下界 80.3% 不过关；81 条重拟合总体一致率仅 61.7%；累计 148 条后原始一致率 75.0%，
+  仍无任何 tau 达 95%。且 shadow 的重跑回复本就丢弃（只采标签、不提供保护），代价是每次
+  fast 终答一次全上下文 strong 调用 + ~0.24 s → `mode: "off"`。小样本假信号被门槛拦住，
+  正是闭环设计的证明
+- **routing：无标签可拟合**（strong 层怎么答未知），只有 tau 一个旋钮（当前 0.80）：
+  fires 27.5%@0.80、21.0%@0.85、14.0%@0.90。11-05 校准 4B 的 p(hard) 分布右移
+  （median 0.63 → 0.73），tau 从 0.75 上调至 0.80 恢复原“采信强度”
 
-建议图：tool_select 混淆矩阵 top 条 + stop 的 tau-覆盖率-一致率曲线。
+建议图：tool_select 混淆矩阵 top 条 + stop 的 tau-覆盖率-一致率曲线 + routing fires 随 tau 的曲线。
 
-## S17 实验数据：错误审计（11 条，全部解释、且都已不复现）
+## S17 实验数据：错误审计（24 条，全部定位）
 
 | 时间 | 数量 | 原因 | 现状 |
 |---|---|---|---|
@@ -294,35 +312,43 @@ jah fit    ~/.jah/litellm-logs   # 阈值拟合 + 各决策点 describe 表
 | 11-02 | 2 | 客户端 max_tokens 超模型上限 400 | 钳制上线后不复现（只钳输出，不截 prompt） |
 | 11-03 | 2 | maas 服务端瞬时故障（PreemptionPlan） | 非配置问题，未再发生 |
 | 11-03 | 1 | 客户端中途断开 | 客户端取消，非代理问题 |
+| 11-07 | 8 | ssh 隧道 / 自托管 27B 首日连接瞬断（vLLM pod 不可达） | 网络/服务端瞬断，11-07 后无同类爆发 |
+| 11-09 | 2 | maas 504 Gateway Time-out | 服务端瞬时，未再发生 |
+| 11-09 | 1 | 客户端中途断开 | 客户端取消 |
+| 11-10 | 2 | 连接瞬断 | 网络瞬时 |
 
-- 要点：**11-04 零新增错误**；routing 1033 次调用 0 错误——决策链路本身是稳的
+- 要点：**11-08 与 11-11 均零错误**；routing 5438 次调用仅 6 错（0.1%）——决策链路本身是稳的
+- 11-02 的 8 条全是配置/迁移期问题，已逐条修复；其余 16 条为服务端或网络瞬时故障，
+  非代理配置问题，且无单一根因复现
 
 ## S18 结论与下一步
 
 结论：
 
-- 四个目标都落地：任意 harness 接一个 OpenAI 兼容端点即用；simple 步走 fast 层直接省钱
-  （本部署 fast 占 63%、24h ¥20.91/869 步、缓存命中 95%）；hard 步强升 + on_error=strong
-  守住准确率；决策开销 ~0.2 s 相对单步 ~12 s 可忽略
-- 闭环机制验证有效：tool_select 与 stop 的负结论都是**机制的正确输出**——shadow 采集 → fit 证伪 →
-  不 promote（前者会误杀 ~87% 步骤的工具调用；后者 81 条标签定案，任何 tau 不过关，连采标签的 strong 重跑钱也省下）
-- 成本/路由漂移可观测：11-04 strong 占比升到 69% 是因为决策模型判 hard 更勤
-  （routing fires 8.5% → 25.4%），report/fit 立刻定位，可经 tau 调节
+- 四个目标都落地：任意 harness 接一个 OpenAI 兼容端点即用（247 会话、11 天生产流量）；
+  simple 步走 fast 层直接省钱（fast 占 63%；fast 层 11-07 起自托管 27B，同负载下省 34%）；
+  hard 步强升 + on_error=strong 守住准确率（strong 37%）；决策开销 ~0.23 s 相对单步 LLM 延迟可忽略
+- 闭环机制验证有效：tool_select（1932 条标签、一致率 14.8%）与 stop（148 条、75.0%）的
+  负结论都是**机制的正确输出**——shadow 采集 → fit 证伪 → 不 promote；前者若上 guard 会误杀
+  约 3/4 步骤的工具调用，后者任何 tau 都过不了 Wilson 门槛
+- 成本/路由漂移可观测：11-04 strong 占比升到 69%（决策模型判 hard 更勤）→ report/fit 立刻定位
+  → 11-05 tau 0.75→0.80 恢复采信强度；换模型（fast 层 27B 自托管）只需改配置，路由/决策/日志/计价不动
+- 决策数据已回流：tool_select shadow 的带标签行 + 完整决策状态直接成为训练语料
+  （`research/data/train_v2` 首版 1,576 条）——生产流量同时是模型迭代的燃料
 
 下一步：
 
-1. **strong 层替换为 Kimi K3.1 Pro**：只改 `litellm_config.yaml` 里 `jah-strong` 的模型/端点/凭据
-   （及 `jah-config.yaml` 的 `strong` 重跑配置），路由、决策点、日志、计价全部不变——
-   这正是"配置即策略"的价值：换模型是配置变更，不是代码变更；替换后用 `jah report`
-   对比 strong 占比与成本
-2. **决策模型换成本地部署的 Decision8B**：`decision` 块改为 local 部署
-   （`provider: local` + 本地端点 + `price_per_m: 0`），去掉对 maas `decision-model-preview`
-   的依赖，决策延迟进一步下降、数据不出内网；注意本地模型的 p(hard) 分布会与线上预览版
-   不同——换后重新跑 `jah report` 看 routing fires，必要时重调 tau
-3. **stop 保护重建**：决策模型路径已证伪；若要找回 fast 终答的 strong 复核，只能无条件重跑（stop:strong，~6% 步的全额 strong 调用）——先拿下一步第 5 项的 A/B pass 数据，再决定这笔钱花不花
-4. routing tau 上探 0.85–0.9 仍是降本旋钮（fires 16.7%/11.7%）；用 describe 表持续监控 p(hard) 分布漂移
-5. 与"全 strong 基线"做 A/B：准确率与速度的直接对比数据（当前为日志观测值）
-6. 多副本压测（Redis 会话已就绪，ADR-006）
+1. **决策模型自训练（SFT/GRPO）**：用生产标签数据（train_v2）在自托管 GPU 上训练
+   AgentDecision-4B 的下一代（`research/scripts/train/12_sft_v1.sh` / `60_grpo_trl.sh` 已就绪）；
+   上线后重跑 `jah fit`，若某决策点达到 95% 门槛即可 promote——这是"数据飞轮"闭环的最后一环
+2. 与"全 strong 基线"做 A/B：准确率与速度的直接对比数据（当前为日志观测值）
+3. **strong 层替换**（如 Kimi K3.1 Pro）：只改 `litellm_config.yaml` 的 `jah-strong` 模型/端点/凭据，
+   路由、决策点、日志、计价全部不变——换模型是配置变更，不是代码变更
+4. routing tau 上探 0.85–0.90 仍是降本旋钮（fires 21.0%/14.0%）；用 describe 表持续监控
+   p(hard) 分布漂移
+5. 多副本压测（Redis 会话已就绪，ADR-006）
+6. stop 保护重建：决策模型路径已证伪；若要找回 fast 终答的 strong 复核，只能无条件重跑
+   （~6% 步的全额 strong 调用）——先拿 A/B 数据再决定这笔钱花不花
 
 ## S19 结尾 / Q&A
 
@@ -334,10 +360,11 @@ jah fit    ~/.jah/litellm-logs   # 阈值拟合 + 各决策点 describe 表
 ### 附：数据口径说明（备答提问）
 
 - 统计来源：`~/.jah/litellm-logs/{steps,decisions}.jsonl`，命令
-  `PYTHONPATH=src python -m jevagentharness.cli report|fit ~/.jah/litellm-logs`（11-04 运行）
-- cost/session ¥0.1649 是**全历史**均值，含计价上线前的 unpriced 行，偏低；看单日更有意义
-  （11-03 ¥21.24/779 步，11-04 ¥3.86/150 步）
+  `PYTHONPATH=src python -m jevagentharness.cli report|fit ~/.jah/litellm-logs`（11-11 运行）
+- cost/session ¥0.75 是**全历史**均值，含计价上线前的 unpriced 行，偏低；看单日更有意义
+  （11-03 ¥21.24/779 步，11-06 ¥82.50/1430 步，11-10 ¥17.47 全为一个超长会话）
 - 11-04 的 strong 69% 是负载相关（当天任务长上下文偏多，判 hard 多），非路由故障
 - 工具集在运行中从 27 个选项缩到 15 个、`bash` 改名 `shell`，tool_select 标签跨两代口径，
-  不影响其"不可用"结论
-- "提速"为机制性结论（fast 层模型更快 + 决策延迟 0.2 s 量级），直接 A/B 对比待补（见 S18）
+  不影响其"不可用"结论；27 个以上工具会触发 4B 卡 26 选项上限（76 次 400），已由
+  `max_options: 26` + 分块提问（knockout）修复
+- "提速"为机制性结论（fast 层模型更快 + 决策延迟 ~0.23 s 量级），直接 A/B 对比待补（见 S18）
