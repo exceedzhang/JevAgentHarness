@@ -65,6 +65,19 @@ def test_routing_can_be_included_as_a_soft_target():
     assert abs(sum(e["target"].values()) - 1.0) < 1e-9
 
 
+def test_same_session_step_different_states_are_distinct_samples():
+    # clients reuse one session id across tasks and the step number restarts: same (session, step)
+    # with different states are two real steps, only an identical state is a retry
+    rows = [
+        _row("tool_select", label="bash", state="TASK: A  STEPS SO FAR: 1"),
+        _row("tool_select", label="read", state="TASK: B  STEPS SO FAR: 1"),
+        _row("tool_select", label="bash", state="TASK: A  STEPS SO FAR: 1"),  # true retry of the first
+    ]
+    ex, summary = from_production(rows)
+    assert len(ex) == 2
+    assert summary["skipped"] == {"duplicate": 1}
+
+
 def test_build_writes_split_and_manifest(tmp_path):
     import tempfile
 

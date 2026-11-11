@@ -13,8 +13,10 @@ finish-check redo (shadow mode), for ``routing`` there is no label (no redo) and
 skipped unless ``--include-routing`` asks for them with the logged model's own p as a soft target.
 
 Only rows with ``fit_ok`` (the label was produced without the decision model's influence - the same
-guard ``jah fit`` uses) are usable as gold; rows are deduped per (session, step, point) because a
-client retry of one step writes only one labelled decision (the settle layer guarantees it).
+guard ``jah fit`` uses) are usable as gold. Rows are deduped per (session, step, point, state hash):
+a client retry of one step writes one labelled decision, but clients reuse one session id across
+several tasks and the step number restarts per task, so the same (session, step) can be several
+distinct real steps - only an identical state is a true retry.
 
 Usage::
 
@@ -25,6 +27,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 from collections import Counter
@@ -89,10 +92,14 @@ def from_production(rows: Iterable[dict[str, Any]], min_options: int = 2,
             target = _onehot(opts, label)
             meta_extra = {"label_source": "s2", "label_tier": r.get("label_tier")}
         eid_base = f"prod:{r.get('session')}/{r.get('step')}/{point}"
-        if eid_base in seen:  # one (session, step, point) is one sample, same as `jah fit`
+        # dedupe on the state content as well: clients reuse one session id across tasks and the step
+        # number restarts per task, so the same (session, step, point) is one sample only when the state
+        # is identical (a true client retry); different states are distinct real steps
+        dedupe = eid_base + ":" + hashlib.sha256(state.encode("utf-8")).hexdigest()[:16]
+        if dedupe in seen:
             skip["duplicate"] += 1
             continue
-        seen.add(eid_base)
+        seen.add(dedupe)
         ex_opts = list(opts)
         if len(ex_opts) > max_options:
             ex_opts = cap_options(ex_opts, label, max_options, random.Random(f"{seed}:{eid_base}"))
