@@ -74,3 +74,11 @@ era 天然可切，见 `6909f1d`）。
 - **stop 不采**：标签要付 strong 全上下文重跑的代价且 fit 已证伪，维持 off。
 - **成本**：shadow 采集只消耗免费决策模型；SFT/GRPO 的 GPU 成本见 `TRAINING_RECIPES.md`
   预算表（T6b 单卡 1–8 h）。
+
+## 6. 首次 train_v2 GRPO 实验记录
+
+2026-11-11 在已发布的 `AgentDecision-4B` adapter 上，用 `data/train_v2` 做了 1 epoch
+决策级 GRPO（`--impl torch`，reward=`correct`）。dev accuracy 10.81% → 35.14%，但
+NLL/Brier/ECE 变差，且训练后段出现明显 entropy collapse。完整命令、指标、问题分析与
+下一次训练建议见
+[`../results/training/grpo_train_v2_2026-11-11.md`](../results/training/grpo_train_v2_2026-11-11.md)。
