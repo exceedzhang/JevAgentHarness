@@ -17,6 +17,7 @@ dicts); the helpers here duck-type them so the checks unit-test without a LiteLL
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -525,6 +526,8 @@ class Ask:
     truncated: bool = False  # the state was sent as a tail cut to max_state_chars (backend.py)
     state: str | None = None  # the exact state string sent (backend-provided, post-truncation); logged to the
     # decision row only when the config enables it - the GRPO training data is built from these rows
+    state_fp: str | None = None  # 16-hex sha256 prefix of the raw state; settle dedupes per (question, state),
+    # because a client may reuse one session id for several tasks whose step numbers restart at zero
     cost_usd: float = 0.0
     latency_s: float = 0.0
     rounds: int = 1
@@ -589,6 +592,7 @@ class Asker:
     async def ask(self, point: str, mode: str, state: str, q: Question, timeout: float, tau: float | None = None,
                   act_option: str | None = None, view: StepView | None = None) -> Ask:
         a = Ask(point=point, mode=mode, question=q.id, options=list(q.options), tau=tau, act_option=act_option)
+        a.state_fp = hashlib.sha256(state.encode("utf-8", "replace")).hexdigest()[:16]
         t0 = time.monotonic()
         try:
             d = await self._decide(state, q, timeout, view)

@@ -486,11 +486,13 @@ async def settle(engine: JAHRouter, sess: Any, step: int, key: str, first_resp: 
     sess.pending = {}
     all_asks = list(asks.values())
     # a client retry may ask the same question for the same step again: `jah fit` treats one step
-    # as one sample, so only the first settle of a question writes its row
+    # as one sample, so only the first settle of a question writes its row. The key includes the
+    # state fingerprint, because a reused session id may restart its step numbers on a different
+    # task: same step number, different state = a different sample, not a retry
     settled = set((sess.step_points.get(step) or {}).get("questions") or [])
     if engine.journal is not None and all_asks:
         for a in all_asks:
-            if a.question in settled:
+            if a.question + (":" + a.state_fp if a.state_fp else "") in settled:
                 continue
             try:
                 await engine.journal.decision({**head(key, engine.cfg.model_name, step), **a.record(),
@@ -498,7 +500,8 @@ async def settle(engine: JAHRouter, sess: Any, step: int, key: str, first_resp: 
             except Exception: # noqa: BLE001 - logging must never break the request
                 pass
     sess.step_points[step] = {"cost_usd": sum(a.cost_usd for a in all_asks), "n_asks": len(all_asks),
-                              "questions": sorted(settled | {a.question for a in all_asks})}
+                              "questions": sorted(settled | {a.question + (":" + a.state_fp if a.state_fp else "")
+                                                             for a in all_asks})}
     for old in [s for s in sess.step_points if s < step - 4]:
         sess.step_points.pop(old, None)
     for old in [s for s in sess.decided if s < step - 4]:

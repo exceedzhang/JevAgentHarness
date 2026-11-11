@@ -836,3 +836,28 @@ def test_decision_rows_carry_the_state_only_when_enabled(run):
             await engine2.close()
 
     run(main())
+
+
+def test_a_reused_session_step_with_a_different_state_writes_both_rows(run):
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, _ = make_engine({"next_tool": lambda q: answer(q, "bash", 0.9)},
+                                    {"tool_select": {"mode": "shadow"}}, log_dir=tmp)
+            m1 = msgs(2, task="Fix the bug")
+            m2 = msgs(2, task="Write the report")  # same step number (same message count), different state
+            pre = JahPreCall(engine=engine)
+            pc = hook(engine)
+            for m in (m1, m2):
+                await engine.decide(m, {"session_id": "s1"})
+                sess = await engine.store.get("s1")
+                sess.plan.clear()
+                await pre.async_pre_call_hook(None, None, rd(m, model="jah-auto"), "completion")
+                await pc.stream_label(rd(m), resp(tool_calls=[tool()]))
+            rows = [r for r in decision_rows(tmp) if r["point"] == "tool_select"]
+            assert len(rows) == 2  # different states on the same (session, step): two samples
+            sess = await engine.store.get("s1")
+            qs = sess.step_points[2]["questions"]  # step 2: msgs(2) = two completed steps
+            assert len(qs) == 2 and qs[0] != qs[1]
+            await engine.close()
+
+    run(main())
