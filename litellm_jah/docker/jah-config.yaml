@@ -21,18 +21,26 @@ decision:
   # With this block taus are read in the calibrated space; taus fitted earlier on 4B/raw rows (jah fit
   # 11-04/11-05) are NOT comparable - decisions rows carry model x calibrated so the fit eras cut apart.
   # The quoted keys are not a YAML 1.1 `off`-style necessity ("noul:2" parses as a string unquoted too);
-  # quotes are used for visibility. choice:6-16 has no bucket on the card, so <=16-option asks get `global`.
+  # quotes are used for visibility. choice:6-16 was re-fit on the new model (GRPO, era >= 2026-11-11 18:00,
+  # 251 tool_select gold rows): 2.508 flattens the overconfident adapter (NLL 2.89->2.05, Brier 1.06->0.84).
+  # Safe rollout: global stays 0.772, so routing/stop (no new-era gold) keep their current firing; only
+  # tool_select (6-16) moves to the re-fit temperature.
   calibration:
     global: 0.7720006824268275
     buckets:
       "noul:2": 0.4230827372940139
       "choice:17-52": 0.05000000000004328 # unreachable in the plugin (asks never offer > 16 options)
       "choice:3-5": 0.9676007232026532
+      "choice:6-16": 2.508204
 # 0.75 was the preview-model fit. On AgentDecision-4B calibrated (era from 2026-11-05 17:01) the p_hard
 # distribution shifted right (median 0.63 -> 0.73): 0.75 fired 47% vs preview's 35%. 0.80 restores the
 # preview-era acting strength (fires ~37%, ~-9% daily cost); 0.85 -> 26% fires / -19% cost if we accept
 # more mid-probability steps on fast without intermediate protection. Quantiles: p50 .725 p60 .785 p70 .835.
-tau: 0.80
+#
+# 11-11 18:00 the decision model was updated (new AgentDecision-4B weights, same calibrated era name).
+# Its p_hard is sharper/higher (median 0.81, p90 0.98): at 0.80 it now fires 50% instead of the ~37%
+# design target. 0.85 restores that strength (fires ~39.5%, per `jah fit --since 2026-11-11 18:00`).
+tau: 0.85
 mode: cascade
 on_error: strong
 first_steps_strong: 1
