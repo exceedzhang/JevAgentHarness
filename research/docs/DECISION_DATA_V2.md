@@ -112,3 +112,27 @@ state（不看结果，与决策模型输入一致），逐条判 ROUTINE/HARD�
 
 注：judge 是 strong 模型的判断（代理，非 ground truth）；即便按 judge 字面，routing 也低于
 always-fast 基线，故"不信任新 routing / 不为其标定"的结论成立。
+
+## 8. A/B 金标：fast 模型真实失败率（11-12/13，含数据告警）
+
+§7 的 judge 是代理。这里用一个**客观** A/B 金标直接回答"这步是否真的 hard"：把 fast 模型
+（Qwen3.8-27B，仅给 15 个工具名、无 schema）跑在每个 routing state 上，让它预测下一个工具，
+与 agent 实际执行的动作（`tool_select` 标签）对比。**fast 未能复现实际动作 = hard**。
+脚本：`scripts/ab_fast_run.py`（远端 27B 上跑）+ `scripts/ab_score.py`（本地计分）。
+
+**数据告警（重要）**：292 条新 era routing 行其实只有 **120 个唯一 (session,step) 步**（客户端重试
+把同一步记多次；同一步的 `actual` 与 `tools` 一致，但 `state` 文本每次渲染不同）。`ab_out.jsonl`
+（fast 预测）以完成顺序写入、与 `ab_input.jsonl` 不按行对齐，故 86 个重复步的两条预测无法绑回
+具体某次重试，其中 42 个两步预测不一致——约 35% 唯一步的 A/B 金标有歧义。因此**下文精确数字依赖
+去重/对齐方法**（`ab_score.py` 另有一处 judge 计数小 bug）。稳健结论不依赖方法。干净重建
+（按步取最早 state 去重 + 重跑 fast）是后续。
+
+**结果（依赖方法，稳健结论如下）**：
+- A/B 金标 hard 率（fast 失败）：~54–63%；judge 金标 hard 率：~55%（两者去重后大致一致 → 确有
+  真实 hard 信号）。
+- **AUC(p_hard vs A/B 金标) ≈ 0.57–0.64**：弱但真实（高于随机）的信号，远非可用路由器。
+- routing 准确率 @tau 0.85 **低于**"全发 strong"/"全发 fast"基线（决策模型只把 ~26–32% 判 hard，
+  往 strong 路由太少）。
+
+**结论**：routing 头弱（决策模型的价值在 tool_select——GRPO 后 10.8%→35.1%；routing 头基本不可用）。
+A/B 数据的干净重建是后续，用于钉死精确数字。

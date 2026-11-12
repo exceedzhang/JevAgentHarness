@@ -54,7 +54,20 @@ def load_env_file(path: pathlib.Path) -> None:
 def load_rows(decisions: pathlib.Path, since: str):
     rows = [json.loads(l) for l in decisions.read_text().splitlines() if l.strip()]
     cutoff = datetime.datetime.fromisoformat(since).timestamp()
-    return [r for r in rows if r.get("point") == "routing" and float(r["ts"]) >= cutoff and r.get("state")]
+    rows = [r for r in rows if r.get("point") == "routing" and float(r["ts"]) >= cutoff and r.get("state")]
+    # A client retry logs the same (session, step) routing decision more than once. The state
+    # rendering can differ between attempts, but the actual action and the offered tools are the
+    # same, so one step is one sample: keep the earliest log per (session, step) (= per id).
+    rows.sort(key=lambda r: float(r["ts"]))
+    seen: set = set()
+    out = []
+    for r in rows:
+        k = (r.get("session"), r.get("step"))
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(r)
+    return out
 
 
 def parse(blob: str):
