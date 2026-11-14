@@ -127,12 +127,13 @@ always-fast 基线，故"不信任新 routing / 不为其标定"的结论成立�
 去重/对齐方法**（`ab_score.py` 另有一处 judge 计数小 bug）。稳健结论不依赖方法。干净重建
 （按步取最早 state 去重 + 重跑 fast）是后续。
 
-**结果（依赖方法，稳健结论如下）**：
-- A/B 金标 hard 率（fast 失败）：~54–63%；judge 金标 hard 率：~55%（两者去重后大致一致 → 确有
-  真实 hard 信号）。
-- **AUC(p_hard vs A/B 金标) ≈ 0.57–0.64**：弱但真实（高于随机）的信号，远非可用路由器。
-- routing 准确率 @tau 0.85 **低于**"全发 strong"/"全发 fast"基线（决策模型只把 ~26–32% 判 hard，
-  往 strong 路由太少）。
+**结果（干净重建，权威）**：120 个唯一步各取最早一条 canonical state 重跑 fast（1:1，无配对歧义）：
+- A/B 金标 hard 率（fast 失败）= **63.3%**；judge 金标 hard 率 = **55.0%**；两者一致率仅 **53.3%**
+  （A/B gold 被 fast 残血污染，"fast 失败" ≠ "这步本身难"）。
+- **AUC(p_hard, A/B 金标) = 0.459**（SE 0.039，≈随机）；**AUC(p_hard, judge 金标) = 0.548**
+  （SE 0.037，略高于随机）。
+- 早先"78 无歧义步"的 0.646 是用多条一致预测的高估；单条干净预测下回落到随机。
 
-**结论**：routing 头弱（决策模型的价值在 tool_select——GRPO 后 10.8%→35.1%；routing 头基本不可用）。
-A/B 数据的干净重建是后续，用于钉死精确数字。
+**结论（最终）**：routing 头基本无有用信号（对两种 gold 的 AUC 都≈随机）；决策模型价值在
+tool_select（GRPO 后 10.8%→35.1%）。维持 routing 现状（global 0.772 + tau 0.85），不为它标定；
+要让 routing 更强需重训 routing 头或用旧模型。

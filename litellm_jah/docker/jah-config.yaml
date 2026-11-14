@@ -68,7 +68,9 @@ decisions:
   # was discarded anyway, so the mode bought labels, not protection, at the price of one strong call on every
   # fast final answer (~6% of steps, the whole transcript) plus ~0.24 s. Protection on early stops would be
   # stop: {mode: strong} - not recommended: the fit says the decision model disagrees with the redo too often.
-  stop: {mode: "off"}
+  # 11-14: back to shadow to collect new-era (GRPO model) stop labels. The old-era fit
+  # (148 labels, 75.0%) is not deployable; we need >=30 labels from the new model to refit.
+  stop: {mode: "shadow"}
 # strong-tier re-run credentials (finish check / guard redos): the plugin's direct
 # litellm.acompletion calls cannot see the deployment's api_key, so name it here
 # (os.environ/NAME is read at call time, so the key stays out of the config)
