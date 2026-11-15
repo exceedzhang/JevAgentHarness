@@ -621,7 +621,68 @@ v3 输出过度自信（mean_conf 0.934），用 `calibrate.py`（NLL golden-sec
 
 **现状（11-15 收工）：** 生产决策模型 = 本轮 hard_v3 最终模型 + 温度缩放（global 3.025 / choice:6-16 3.0）；dev 51.52% / NLL 1.63 / ECE 0.075；reply 40.5%、edit 20.8%；GPU1 Embedding 已恢复。
 
-## 16. 相关文档
+## 16. v4：dev 842 扩 dev + 训练（2026-11-15 晚）
+
+### 16.1 dev 842 切分
+
+旧 dev 264 太小（±5pp 变化不可分辨）且 session 偏斜严重（top 3 session 占 2559 行的 60.5%），做一次 session 级分层重切（`scripts/resplit_dev_v4.py`，commit `834378d`）：
+- top 3 巨型 session（975/316/258 行）→ 只进 train；
+- legacy holdout（旧 dev+dev_alt+dev_shell，370 行 / 11 session）全部保留进新 dev（v1–v3 结果可对照）；
+- 其余按整 session 贪心选入，直到逐工具配额满（read 120 / edit 90 / reply 120 / shell 150 / done 30 / final_result 71 / compress 28 / grep 22 / glob 16 / write 20 / webfetch 25 / not_done 15，其他工具 ≤10）。
+
+结果：**dev 842 / 50 sessions**（旧 264 的 3.2 倍）、train 1717 / 89 sessions、session 泄漏 0。逐工具达成：read 134 / reply 165 / shell 168 / edit 88 / final_result 14 / done 26（final_result、done 受 session 上限限制未达配额，权衡接受）；弱工具 compress 27 / grep 22 / glob 15 / write 18 / webfetch 23 / not_done 14（全池不足 30，只能全取，需每周挖矿补齐）。产物：`data/train_v4/{train,dev,dev_alt,dev_shell}.jsonl + MANIFEST_v4.json`。
+
+### 16.2 v4 训练
+
+从 **v3 final**（生产 adapter，继承 reply/edit 增益）继续，新 train 1717 上 1 epoch：
+- `--init checkpoints/grpo_train_v3_clean_hard_v3 --train data/train_v4/train.jsonl --dev data/train_v4/dev.jsonl`
+- 108 步（1717/16）、P=16、lr 3e-6、beta 0.05、G=16、max-len 4608、skip-zero-std、gc、save 5、seed 0，~2h28m。
+- 训练内 dev（842）：最佳 **step 15 = 54.39%**，其后 18 次评估全在 53.21–53.80 区间未超越；entropy 坍缩（step 70 时 0.075），尾段 KL 1.33（相对 v3 参考漂移）。
+
+### 16.3 与 v3 对比（同 dev 842，生产口径，raw）
+
+| 指标 | v3 final | v4 step15 | v4 final |
+|---|---|---|---|
+| acc | 54.16% | **54.28%** | 53.68% |
+| NLL（低好） | **3.042** | 3.092 | 3.342 |
+| ECE（低好） | 0.378 | **0.374** | 0.396 |
+| auroc | **0.666** | 0.662 | 0.666 |
+| mean_conf | 0.919 | 0.917 | 0.932 |
+
+v4 step15 仅比 v3 高 0.12pp（≈1 条，噪声内打平）；v4 final 低 0.48pp。
+
+**逐工具（dev 842，按条数）：**
+
+| 工具 | n | v3 | v4 step15 | v4 final |
+|---|---|---|---|---|
+| shell | 168 | 79.8 | 81.0 | 80.4 |
+| reply_without_tool | 165 | **65.5** | 61.2 | 57.0 ↓ |
+| read | 134 | **47.0** | 44.8 | 41.0 ↓ |
+| edit | 88 | 40.9 | 46.6 | **52.3** ↑ |
+| bash | 42 | 64.3 | 71.4 | **76.2** ↑ |
+| shell_run | 29 | 69.0 | 69.0 | 69.0 |
+| compress | 27 | 14.8 | 14.8 | 14.8 |
+| done | 26 | 92.3 | 88.5 | **96.2** ↑ |
+| webfetch | 23 | 30.4 | 34.8 | **39.1** ↑ |
+| grep | 22 | 4.5 | 4.5 | 4.5 |
+| write | 18 | 33.3 | 33.3 | 27.8 |
+| glob | 15 | 0.0 | 0.0 | 0.0 |
+| final_result | 14 | 78.6 | 78.6 | 78.6 |
+| not_done | 14 | 7.1 | 7.1 | 0.0 |
+| execute | 13 | 23.1 | 30.8 | 30.8 |
+
+（长尾 n≤7 的工具省略；shell+shell_run+shell_wait=204，与 dev_shell 切片一致。）
+
+**跷跷板（与 v2 同型）**：v4 final 的 edit +11.4pp / bash +11.9pp / webfetch +8.7pp 被 reply **−8.5pp** / read **−6.0pp** 抵消——模型把 reply/read 的边界往 edit/bash 侧推。逐工具此消彼长，整体 acc 因此打平/略降。根因：reply/read 与 edit/bash 的边界在 GRPO 下互相挤压，同分布数据继续训练压不平；**打破跷跷板要靠数据**（§11：reply/read 边界难例 + 逐工具 dev 切片 + 弱工具挖矿）。
+
+### 16.4 结论
+
+- **v4 不部署，生产维持 v3**（v3 final + 校准 3.025/3.0，已在线上）。
+- 本轮价值不是“v4 赢了”，而是**建立了新 dev 842 基线（v3 = 54.16%）**——此后 ±5pp 变化可分辨、逐工具切片样本充足。
+- 结论：**同分布数据上继续 GRPO 无净增益**，瓶颈在数据本身（弱工具 compress/glob/grep，dev 池 <30）而非训练步数。下一步按 §11 数据积累路线（每周挖矿补弱工具 + 逐工具 dev 切片），攒够后出 v5（新数据 + 弱工具加权）。
+- 环境：训练结束已恢复 `vllm-openai-2`（embedding，GPU1 15GB）。
+
+## 17. 相关文档
 
 - train_v2 / train_v3 对比记录：`results/training/grpo_train_v2_2026-11-11.md` §12
 - clean dev 划分说明：`data/train_v3_clean/SPLIT.md`
@@ -630,19 +691,20 @@ v3 输出过度自信（mean_conf 0.934），用 `calibrate.py`（NLL golden-sec
 - 脚本：`scripts/train/60_grpo_trl.sh`
 - 非 shell 难例挖矿（§14/§15）：`src/jevharness/training/mine_hard_cases.py`、`scripts/build_hard_weighted.py`、工具上限 `data/tool_caps_v2.json` / `data/tool_caps_v3.json`
 - 校准与评估（§15.3）：`src/jevharness/training/calibrate.py`、`src/jevharness/training/eval_decisions.py`
+- dev 842 切分（§16）：`scripts/resplit_dev_v4.py`、`data/train_v4/MANIFEST_v4.json`
 
-## 17. 经验总结（五轮合并）
+## 18. 经验总结（六轮合并）
 
-以下经验从本文档的五轮（首轮 train_v3、P1 clean、hard_v1/v2/v3）中合并，供日后使用。
+以下经验从本文档的六轮（首轮 train_v3、P1 clean、hard_v1/v2/v3、v4）中合并，供日后使用。
 
-### 17.1 数据
+### 18.1 数据
 
 1. **数据量 ≠ 训练量**：train_v3 首轮数据多 63%，但 104 步早停只消费 33.5%（832/2481），有效梯度与上一轮几乎相同 → 增益为 0。**1 epoch 必须跑满（或早停指标 + min-steps 保证覆盖），否则加数据毫无意义**。
 2. **加数据先查分布**：train 68.4% fast 标签 vs dev 56.8% strong；42% dev 落在 train 里 ≤25 条的工具上。**加数据前先对齐 train/dev 的工具、来源、难度分布**，总量达标不代表有效。
 3. **有效样本 ≠ 行数**：zero-std 0.51 + 单 session 39.3% 意味着大量行是同一决策边界的重复。**去重键 + session 上限（≤5%）+ 按"唯一决策边界"计数**。
 4. **长尾靠挖矿，不靠流量**：13 个工具 <1%（1–21 条）自然积累学不动；hard-case mining 一天就补出 287/340 条。**弱工具配额按 dev 缺口分配（tool_caps），不按流量比例**。
 
-### 17.2 训练
+### 18.2 训练
 
 5. **GRPO 的主要浪费是 zero-variance groups**（frac_zero_std 0.31–0.75：整组答一样就没梯度）→ `--skip-zero-std`、加大 G。
 6. **早停用 dev 指标**：entropy/zero-std 早停把首轮停在 104/120（覆盖不足）；改 dev-acc + patience + min-steps 后三轮都跑满 1 epoch。entropy 早停只当防崩保险。
@@ -650,14 +712,14 @@ v3 输出过度自信（mean_conf 0.934），用 `calibrate.py`（NLL golden-sec
 8. **从上一轮 best step 继续**（而不是 base）：v3 从 v2 step135 起，直接继承 reply 增益，再修正偏置——**增量式迭代比每轮推倒重来高效**。
 9. **一轮一个主要假设**：v2 只加 reply → 发现过校正；v3 降 reply + 加 read/edit → 三项同时改善。假设清晰，逐工具指标才能归因。
 
-### 17.3 评估
+### 18.3 评估
 
 10. **聚合 acc 会骗人**：v2 整体 50.38% "持平"，实际 reply +19pp / read −11pp（此消彼长）。**验收必须逐工具 + 混淆矩阵，整体 acc 只是门槛**。
 11. **口径固定并写进文档**：同一模型 52.65%（训练内 eval）vs 51.52%（eval_decisions）；同一基线 50.00/50.38。**验收统一用生产口径（served model + 校准），文档注明以哪个为准**。
 12. **GRPO 的副作用是过度自信**：每轮 raw NLL/ECE 都在变差（v3 ECE 0.42、mean_conf 0.93）→ **部署前必须 temperature scaling**（本轮 3.025 把 ECE 压到 0.075、NLL 1.63）。argmax 不变意味着缩放只修校准、不改决策——便宜且必须。
 13. **dev 太小会让"提升"不显著**：37 条时 35% ≈ 多数类先验，Wilson 区间全重叠；扩到 264 后才能区分 +6pp。**dev 目标几百条 + 逐工具切片各 ≥30**。
 
-### 17.4 流程与部署
+### 18.4 流程与部署
 
 14. **验收门前置**：开训前先写死（如 reply≥20%、edit≥25%、整体≥50%、NLL/ECE 不劣）。**"不部署"的结论和"部署"同样要记录在案**（hard_v2 就是靠这个纪律避免负迁移上线）。
 15. **部署 = adapter + calibration 原子操作**：两者必须同一窗口切换，**切换后立即线上验证**（看新决策行的 p 分布形态：p_hard 0.094–0.359 一眼确认 fires 骤降）。
@@ -665,7 +727,7 @@ v3 输出过度自信（mean_conf 0.934），用 `calibrate.py`（NLL golden-sec
 17. **挖矿脚本的坑（已修，留档）**：session cap 必须 per-(session,tool)——per-session 会让弱工具饿死（compress 84 个错误只选出 1 条）；`--exclude` 必须覆盖全部已用集（train/dev 各切片、历次 hard_cases）防泄漏。
 18. **先修评估再修训练**：口径不一致时，任何"提升"都不可信；把评估做对（同口径、固定 batch、对比表）是一切优化的前提。
 
-### 17.5 一句话
+### 18.5 一句话
 
 本轮流程验证了完整的飞轮：**生产挖矿 → 难例加权 → 增量 GRPO → 逐工具验收 → 温度缩放 → 原子部署 → 线上验证**。最容易踩的三个坑：①加数据但没训满；②只看聚合指标导致过校正上线；③忘温度缩放导致过度自信。
 
