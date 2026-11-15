@@ -20,18 +20,17 @@ decision:
   # p' ∝ p^(1/T) per <kind>:<bucket>, `global` the fallback (see docs/calibration-proposal.md).
   # With this block taus are read in the calibrated space; taus fitted earlier on 4B/raw rows (jah fit
   # 11-04/11-05) are NOT comparable - decisions rows carry model x calibrated so the fit eras cut apart.
-  # The quoted keys are not a YAML 1.1 `off`-style necessity ("noul:2" parses as a string unquoted too);
-  # quotes are used for visibility. choice:6-16 was re-fit on the new model (GRPO, era >= 2026-11-11 18:00,
-  # 251 tool_select gold rows): 2.508 flattens the overconfident adapter (NLL 2.89->2.05, Brier 1.06->0.84).
-  # Safe rollout: global stays 0.772, so routing/stop (no new-era gold) keep their current firing; only
-  # tool_select (6-16) moves to the re-fit temperature.
+  # The quoted keys are not a YAML 1.1 `off`-style necessity; quotes are used for visibility.
+  # 11-15 full re-fit on the v3 GRPO model (train_v3_clean dev, 264 rows, raw NLL 3.21): global 3.025 +
+  # choice:6-16 3.000 flatten its overconfident output (mean_conf 0.93->0.58, ECE 0.42->0.075, NLL 3.21->1.63;
+  # argmax unchanged). This replaces the old model's temps (choice:3-5 0.968, noul:2 0.423) outright.
+  # NOTE (approved 11-15): global 0.772->3.025 flattens routing/stop p(hard) hard - fires@tau0.85 drops from
+  # ~38% to ~2-3%, so nearly all steps go fast. The calibration matches the v3 adapter
+  # (research/checkpoints/grpo_train_v3_clean_hard_v3), not the previously served model.
   calibration:
-    global: 0.7720006824268275
+    global: 3.0251733656628823
     buckets:
-      "noul:2": 0.4230827372940139
-      "choice:17-52": 0.05000000000004328 # unreachable in the plugin (asks never offer > 16 options)
-      "choice:3-5": 0.9676007232026532
-      "choice:6-16": 2.508204
+      "choice:6-16": 2.9999808412939433
 # 0.75 was the preview-model fit. On AgentDecision-4B calibrated (era from 2026-11-05 17:01) the p_hard
 # distribution shifted right (median 0.63 -> 0.73): 0.75 fired 47% vs preview's 35%. 0.80 restores the
 # preview-era acting strength (fires ~37%, ~-9% daily cost); 0.85 -> 26% fires / -19% cost if we accept
