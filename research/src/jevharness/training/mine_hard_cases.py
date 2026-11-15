@@ -26,7 +26,8 @@ P0 -> P2 and errors before low-margin cases; each ``(priority, gold tool)`` buck
 ``--max-per-tool`` so a single dominant tool cannot fill the queue.  ``--tool-caps`` (JSON
 ``{tool: cap}``, string or file) overrides the per-bucket cap with a per-tool cap counted across
 priorities (``0`` excludes the tool, e.g. to mine non-shell cases only), and ``--max-per-session``
-caps rows per session so one long trajectory cannot dominate the queue.
+caps rows per ``(session, tool)`` pair so one long trajectory cannot dominate a single tool,
+while still letting it contribute to several different tools.
 """
 
 from __future__ import annotations
@@ -240,14 +241,14 @@ def select_capped(queue: list[dict[str, Any]], max_per_tool: int = 80, max_total
     ``tool_caps`` (tool -> int) overrides ``max_per_tool`` for the listed tools and is counted
     across all priorities (``0`` excludes the tool, e.g. to mine non-shell cases only).  Other
     tools keep the per-``(priority, gold tool)`` bucket capped by ``max_per_tool``.
-    ``max_per_session`` (0 = unlimited) caps rows per ``meta.session`` so one long trajectory
-    cannot dominate the queue.
+    ``max_per_session`` (0 = unlimited) caps rows per ``(session, tool)`` pair so one long
+    trajectory cannot dominate a single tool while still contributing to several tools.
     """
     tool_caps = dict(tool_caps or {})
     capped: list[dict[str, Any]] = []
     cap_bucket: Counter[tuple[str, str]] = Counter()
     cap_tool: Counter[str] = Counter()
-    cap_session: Counter[str] = Counter()
+    cap_session_tool: Counter[tuple[str, str]] = Counter()
     for row in queue:
         m = row["mine"]
         tool = m["gold"]
@@ -257,7 +258,7 @@ def select_capped(queue: list[dict[str, Any]], max_per_tool: int = 80, max_total
         elif cap_bucket[(m["priority"], tool)] >= max_per_tool:
             continue
         session = str((row.get("meta") or {}).get("session", ""))
-        if max_per_session and session and cap_session[session] >= max_per_session:
+        if max_per_session and session and cap_session_tool[(session, tool)] >= max_per_session:
             continue
         capped.append(row)
         if tool in tool_caps:
@@ -265,7 +266,7 @@ def select_capped(queue: list[dict[str, Any]], max_per_tool: int = 80, max_total
         else:
             cap_bucket[(m["priority"], tool)] += 1
         if session:
-            cap_session[session] += 1
+            cap_session_tool[(session, tool)] += 1
         if len(capped) >= max_total:
             break
     return capped
@@ -296,7 +297,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     help="JSON {tool: cap} as string or file path; overrides --max-per-tool per "
                          "gold tool (counted across priorities; 0 excludes the tool)")
     ap.add_argument("--max-per-session", type=int, default=0,
-                    help="cap selected rows per session (0 = unlimited)")
+                    help="cap selected rows per (session, tool) pair (0 = unlimited)")
     ap.add_argument("--max-total", type=int, default=1000)
     args = ap.parse_args(argv)
 

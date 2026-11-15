@@ -36,6 +36,17 @@ def test_max_per_session_caps_rows_per_session():
     assert [r["meta"]["session"] for r in sel].count("s1") == 2
 
 
+def test_session_cap_is_per_session_tool_pair():
+    rows = [_row("s1", "edit") for _ in range(3)] + [_row("s1", "reply_without_tool") for _ in range(3)]
+    sel = select_capped(rows, max_per_tool=10, max_per_session=2)
+    # the cap is per (session, tool) pair: s1 keeps 2 edit AND 2 reply (not 2 in total), so a
+    # long session with compress errors is not starved by its own reply/edit rows
+    assert len(sel) == 4
+    tools = [r["mine"]["gold"] for r in sel]
+    assert tools.count("edit") == 2
+    assert tools.count("reply_without_tool") == 2
+
+
 def test_sessions_without_meta_are_not_capped():
     rows = [{"mine": {"priority": "P0", "gold": "edit"}} for _ in range(5)]
     assert len(select_capped(rows, max_per_tool=10, max_per_session=2)) == 5
