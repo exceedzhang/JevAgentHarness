@@ -28,10 +28,14 @@ import argparse
 import collections
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
-from jevharness.training.mine_hard_cases import TOOL_ALIASES
+# Standalone script: make the package importable without requiring PYTHONPATH=src.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from jevharness.training.mine_hard_cases import TOOL_ALIASES  # noqa: E402
 
 
 TOOL_CAPS = {
