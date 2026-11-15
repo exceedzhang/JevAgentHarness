@@ -1,0 +1,125 @@
+{
+  "pool": 2559,
+  "sessions": 139,
+  "giants": {
+    "ses_e3fa38decffeZo5PuFEeAC4qaO": 975,
+    "ses_e545989bfffe31YmtrqmHVshCm": 258,
+    "ses_e73cc60c6ffeMDzqysv0QZIdl7": 316
+  },
+  "dev": 842,
+  "dev_sessions": 50,
+  "dev_legacy_rows": 370,
+  "dev_new_rows": 472,
+  "dev_shell_rows": 204,
+  "train": 1717,
+  "quota_check": {
+    "read": {
+      "dev": 134,
+      "quota": 120
+    },
+    "edit": {
+      "dev": 88,
+      "quota": 90
+    },
+    "reply_without_tool": {
+      "dev": 165,
+      "quota": 120
+    },
+    "shell": {
+      "dev": 168,
+      "quota": 150
+    },
+    "done": {
+      "dev": 26,
+      "quota": 30
+    },
+    "final_result": {
+      "dev": 14,
+      "quota": 71
+    },
+    "compress": {
+      "dev": 27,
+      "quota": 28
+    },
+    "grep": {
+      "dev": 22,
+      "quota": 22
+    },
+    "glob": {
+      "dev": 15,
+      "quota": 16
+    },
+    "write": {
+      "dev": 18,
+      "quota": 20
+    },
+    "webfetch": {
+      "dev": 23,
+      "quota": 25
+    },
+    "not_done": {
+      "dev": 14,
+      "quota": 15
+    }
+  },
+  "train_by_tool": {
+    "final_result": 57,
+    "reply_without_tool": 181,
+    "not_done": 3,
+    "read": 257,
+    "edit": 297,
+    "done": 8,
+    "write": 39,
+    "bash": 6,
+    "browse_web": 2,
+    "ask_human": 1,
+    "compress": 84,
+    "shell": 707,
+    "execute": 10,
+    "skill": 6,
+    "glob": 3,
+    "grep": 52,
+    "question": 2,
+    "webfetch": 2
+  },
+  "dev_by_tool": {
+    "read": 134,
+    "firecrawl-mcp_firecrawl_search": 2,
+    "webfetch": 23,
+    "reply_without_tool": 165,
+    "done": 26,
+    "edit": 88,
+    "not_done": 14,
+    "glob": 15,
+    "write": 18,
+    "shell": 168,
+    "grep": 22,
+    "compress": 27,
+    "final_result": 14,
+    "question": 5,
+    "websearch": 5,
+    "context7_resolve-library-id": 4,
+    "context7_query-docs": 4,
+    "shell_run": 29,
+    "browse_web": 6,
+    "web_search": 2,
+    "ask_user_question": 1,
+    "execute": 13,
+    "bash": 42,
+    "present": 1,
+    "skill": 1,
+    "web_fetch": 5,
+    "shell_wait": 7,
+    "ask_human": 1
+  },
+  "top_dev_sessions": {
+    "ses_e4c686b11ffeeT4AnzMyVHESpx": 172,
+    "ses_e27f9491affenDUEuVjrhYiJKj": 66,
+    "ses_ed1bb3420ffefOkl5VtEyqvYvm": 64,
+    "da4bd2b11ab8b9cb": 48,
+    "ses_e6976ef4fffeEk0ykh6w6NTEOR": 41,
+    "49ff346c6f7a19b5": 38,
+    "ses_e35ef9a6effeLpLaZKjKA2iVte": 29,
+    "468fb6f524da322e": 29
+  }
+}
