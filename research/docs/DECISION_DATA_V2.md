@@ -177,3 +177,51 @@ tool_select（GRPO 后 10.8%→35.1%）。维持 routing 现状（global 0.772 +
 2026-11-15 已按该 split 做 P1 重训：`dev-acc` 早停在 step 55/137（未跑满 1 epoch），
 最佳 top-1 为 `step-000040`；主 dev 相对 init +3.79 pp，但 NLL/Brier/ECE 都更差。
 结果与对比见 [`../results/training/grpo_train_v3_2026-11-14.md`](../results/training/grpo_train_v3_2026-11-14.md) §12。
+
+## 11. 数据积累路线（11-15，hard_v2/v3 之后）
+
+现状基线：生产 = hard_v3 模型 + 新校准（dev 51.52%、NLL 1.63、ECE 0.075）；
+tool_select 标签采集 ~300-500 条/天（shadow）；dev 264 条。
+
+### 11.1 轨道 A：每周生产挖矿（主力）
+- 命令：`mine_hard_cases --decisions data/decisions.jsonl --exclude <历次 hard_cases + 全部 dev 切片>`（服务器）；
+  模型/adapter 用当前生产 adapter 打分。
+- caps 向弱工具倾斜：grep / glob / compress / webfetch / write 提配额；reply 继续压低
+  （已 40.5%，防 v2 式过校正）；shell 系 = 0。
+- 净增 ~500 条/月（标签增速 ~300-500/天，去重 + 排除已用后）；gold = agent 实际动作
+  （自动入库），抽查 10% 保证标签质量。
+- 新样本：本机 `~/.jah/litellm-logs/decisions.jsonl` 定期 scp 上服务器
+  `research/data/decisions.jsonl`（11-15 时 10100 行）。
+
+### 11.2 轨道 B：扩 dev（最优先，结构性短板）
+- 当前 dev 264 条太小：单工具 ±4pp ≈ ±10 条，区分度低（v2 的 read 回退就靠它才看见）。
+- rolling holdout：最近 3-5 天的 session 只进 dev、不进 train（时间切分天然防泄漏，
+  与 session 切分二选一或混合）。
+- 逐工具切片（仿 dev_alt/dev_shell）：dev_grep / dev_compress / dev_edit / dev_web，
+  各 10-30 条，用于逐工具验收。
+- 目标：3 个月内 dev 264 → 800-1200，每个弱工具 ≥30 条。
+
+### 11.3 轨道 C（低优先）
+- **stop**：shadow 继续攒新 era 标签，≥30 条后重拟合 tau —— 唯一有直接省钱收益的点
+  （fast 终答不再被 strong 重跑）。
+- **routing**：现状 = 校准后几乎不 fire（p_hard 0.09-0.36 < tau 0.85），first-step +
+  finish check 兜底。若要翻案，需要 A/B 金标连续 4 周（~150 唯一步/周，攒 600+）且
+  AUC 稳定 >0.65；否则维持现状。
+
+### 11.4 纪律
+1. 去重键 = `(session, step, sha256(state)[:16])`，保留最早一条（与 data_v2 一致）。
+2. 防泄漏：任何新样本入 train 前先 `--exclude` 对照 dev / dev_alt / dev_shell + 历次
+   hard_cases（v2/v3 均为 0 泄漏，保持）。
+3. 版本化：`train_v4` / `hard_weighted_v4` + MANIFEST 提交仓库；不覆盖旧版本。
+4. session 失衡：单 session ≤5% 入 train 池（v3 头部 session 占 39%，需降采样）。
+5. 验收门 = 逐工具混淆矩阵 + NLL/ECE；整体 acc 不算数（v2 教训：整体 50% 不变，
+   但 reply +19pp 与 read −11pp 此消彼长）。
+6. truncated 样本：本轮 build 丢了 41 条（state 超 2800 token 截断），需查占比与原因，
+   决定是否提高 max_state_tokens 或单独处理。
+
+### 11.5 节奏
+- 每周：生产挖矿（轨道 A）+ 时间切分进 dev（轨道 B）。
+- 每 2-4 周：合并构建 `hard_weighted_vN` → 训练（P=16、skip-zero-std、dev-acc 早停）
+  → 逐工具验收 → 温度缩放 → 部署（adapter + calibration 一起，见 grpo_train_v3 记录
+  §14/§15 的流程）。
+- 每月：审 session 失衡与 truncated 比例；看 stop 标签是否到 30 条可拟合。
