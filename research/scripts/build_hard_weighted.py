@@ -103,7 +103,23 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=Path("data/train_v3_clean/train_hard_weighted_v1.jsonl"))
     ap.add_argument("--selected-out", type=Path, default=Path("data/train_v3_clean/train_hard_cases_v1.jsonl"))
     ap.add_argument("--manifest-out", type=Path, default=Path("data/train_v3_clean/MANIFEST_hard_weighted_v1.json"))
+    ap.add_argument("--version", default="v1", help="manifest version suffix, e.g. v2")
+    ap.add_argument("--session-cap", type=int, default=None, help="override SESSION_CAP")
+    ap.add_argument("--tool-caps", default=None,
+                    help="JSON {tool: cap} as string or file path; merged over the built-in caps")
+    ap.add_argument("--priority-weights", default=None,
+                    help='JSON {"P0": 3, ...}; merged over PRIORITY_WEIGHT')
     args = ap.parse_args()
+    session_cap = SESSION_CAP if args.session_cap is None else args.session_cap
+    tool_caps = dict(TOOL_CAPS)
+    if args.tool_caps:
+        p = Path(args.tool_caps)
+        tool_caps.update(json.loads(p.read_text() if p.exists() else args.tool_caps))
+    weights = dict(PRIORITY_WEIGHT)
+    if args.priority_weights:
+        p = Path(args.priority_weights)
+        weights.update({str(k): int(v) for k, v in
+                        json.loads(p.read_text() if p.exists() else args.priority_weights).items()})
 
     clean = read_jsonl(args.clean_dir / "train.jsonl")
     queue = read_jsonl(args.queue)
@@ -135,8 +151,8 @@ def main() -> None:
             continue
         session = str((row.get("meta") or {}).get("session", ""))
         tool = gold_tool(row)
-        cap = TOOL_CAPS.get(tool, 1)
-        if by_session[session] >= SESSION_CAP:
+        cap = tool_caps.get(tool, 1)
+        if by_session[session] >= session_cap:
             skipped["session_cap"] += 1
             continue
         if by_tool[tool] >= cap:
@@ -149,7 +165,7 @@ def main() -> None:
     # Repeated rows are intentional: build_rows does not deduplicate.
     extras: list[dict[str, Any]] = []
     for row in selected:
-        weight = PRIORITY_WEIGHT.get(priority(row), 1)
+        weight = weights.get(priority(row), 1)
         copies = weight if key(row) not in train_keys else max(0, weight - 1)
         extras.extend([row] * copies)
 
@@ -167,13 +183,13 @@ def main() -> None:
     write_jsonl(args.selected_out, selected)
 
     manifest = {
-        "version": "train_hard_weighted_v1",
+        "version": f"train_hard_weighted_{args.version}",
         "clean_train": str(args.clean_dir / "train.jsonl"),
         "queue": str(args.queue),
         "out": str(args.out),
         "selected_out": str(args.selected_out),
-        "caps": {"session": SESSION_CAP, "tool": TOOL_CAPS},
-        "priority_weight": PRIORITY_WEIGHT,
+        "caps": {"session": session_cap, "tool": tool_caps},
+        "priority_weight": weights,
         "queue_rows": len(queue),
         "queue_unique_keys": len(seen),
         "selected_hard_cases": len(selected),

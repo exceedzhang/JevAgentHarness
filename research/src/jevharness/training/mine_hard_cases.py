@@ -23,7 +23,10 @@ Examples::
 
 The output is ``queue.jsonl`` plus ``summary.json`` and ``SUMMARY.md``.  ``queue.jsonl`` is sorted
 P0 -> P2 and errors before low-margin cases; each ``(priority, gold tool)`` bucket is capped by
-``--max-per-tool`` so a single dominant tool cannot fill the queue.
+``--max-per-tool`` so a single dominant tool cannot fill the queue.  ``--tool-caps`` (JSON
+``{tool: cap}``, string or file) overrides the per-bucket cap with a per-tool cap counted across
+priorities (``0`` excludes the tool, e.g. to mine non-shell cases only), and ``--max-per-session``
+caps rows per session so one long trajectory cannot dominate the queue.
 """
 
 from __future__ import annotations
@@ -185,6 +188,7 @@ def summarize(scored: list[dict[str, Any]], queue: list[dict[str, Any]], total: 
         "n_input_examples": total,
         "n_seen_skipped": seen_skipped,
         "n_queue": len(queue),
+        "n_selected_sessions": len({str((r.get("meta") or {}).get("session", "")) for r in queue}),
         "n_selected_by_priority": dict(sorted(by_priority.items())),
         "n_selected_by_reason": dict(sorted(by_reason.items())),
         "n_selected_by_tool": dict(sorted(selected_tool.items())),
@@ -201,6 +205,7 @@ def write_summary_md(summary: dict[str, Any], out: Path) -> None:
         f"- input examples: **{summary['n_input_examples']}**",
         f"- already seen (excluded): **{summary['n_seen_skipped']}**",
         f"- selected: **{summary['n_queue']}**",
+        f"- selected sessions: **{summary['n_selected_sessions']}**",
         f"- priority counts: `{summary['n_selected_by_priority']}`",
         f"- reason counts: `{summary['n_selected_by_reason']}`",
         f"- selected by tool: `{summary['n_selected_by_tool']}`",
@@ -227,6 +232,45 @@ def write_summary_md(summary: dict[str, Any], out: Path) -> None:
     (out / "SUMMARY.md").write_text("\n".join(lines))
 
 
+def select_capped(queue: list[dict[str, Any]], max_per_tool: int = 80, max_total: int = 1000,
+                  tool_caps: dict[str, int] | None = None,
+                  max_per_session: int = 0) -> list[dict[str, Any]]:
+    """Cap a priority-sorted queue.
+
+    ``tool_caps`` (tool -> int) overrides ``max_per_tool`` for the listed tools and is counted
+    across all priorities (``0`` excludes the tool, e.g. to mine non-shell cases only).  Other
+    tools keep the per-``(priority, gold tool)`` bucket capped by ``max_per_tool``.
+    ``max_per_session`` (0 = unlimited) caps rows per ``meta.session`` so one long trajectory
+    cannot dominate the queue.
+    """
+    tool_caps = dict(tool_caps or {})
+    capped: list[dict[str, Any]] = []
+    cap_bucket: Counter[tuple[str, str]] = Counter()
+    cap_tool: Counter[str] = Counter()
+    cap_session: Counter[str] = Counter()
+    for row in queue:
+        m = row["mine"]
+        tool = m["gold"]
+        if tool in tool_caps:
+            if cap_tool[tool] >= tool_caps[tool]:
+                continue
+        elif cap_bucket[(m["priority"], tool)] >= max_per_tool:
+            continue
+        session = str((row.get("meta") or {}).get("session", ""))
+        if max_per_session and session and cap_session[session] >= max_per_session:
+            continue
+        capped.append(row)
+        if tool in tool_caps:
+            cap_tool[tool] += 1
+        else:
+            cap_bucket[(m["priority"], tool)] += 1
+        if session:
+            cap_session[session] += 1
+        if len(capped) >= max_total:
+            break
+    return capped
+
+
 def main(argv: list[str] | None = None) -> dict[str, Any]:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group(required=True)
@@ -248,6 +292,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     help="tag errors at/above this confidence")
     ap.add_argument("--max-per-tool", type=int, default=80,
                     help="cap selected rows per (priority, gold tool)")
+    ap.add_argument("--tool-caps", default=None,
+                    help="JSON {tool: cap} as string or file path; overrides --max-per-tool per "
+                         "gold tool (counted across priorities; 0 excludes the tool)")
+    ap.add_argument("--max-per-session", type=int, default=0,
+                    help="cap selected rows per session (0 = unlimited)")
     ap.add_argument("--max-total", type=int, default=1000)
     args = ap.parse_args(argv)
 
@@ -274,17 +323,15 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         0 if "error" in r["mine"]["reasons"] else 1,
         r["mine"]["margin"],
     ))
-    capped: list[dict[str, Any]] = []
-    cap: Counter[tuple[str, str]] = Counter()
-    for row in queue:
-        key = (row["mine"]["priority"], row["mine"]["gold"])
-        if cap[key] >= args.max_per_tool:
-            continue
-        capped.append(row)
-        cap[key] += 1
-        if len(capped) >= args.max_total:
-            break
-    queue = capped
+    tool_caps: dict[str, int] = {}
+    if args.tool_caps:
+        raw = Path(args.tool_caps)
+        tool_caps = json.loads(raw.read_text() if raw.exists() else args.tool_caps)
+        bad = [t for t, v in tool_caps.items() if not isinstance(v, int) or v < 0]
+        if bad:
+            raise SystemExit(f"--tool-caps values must be non-negative ints, got: {bad}")
+    queue = select_capped(queue, args.max_per_tool, args.max_total, tool_caps,
+                          args.max_per_session)
 
     with (out / "queue.jsonl").open("w") as f:
         for row in queue:
