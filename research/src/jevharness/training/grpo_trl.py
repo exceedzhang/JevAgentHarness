@@ -235,8 +235,9 @@ def _load(a: argparse.Namespace, dtype: torch.dtype) -> tuple[Any, Any, Any]:
     return model, tok, peft_config
 
 
-def _save(model: Any, tok: Any, a: argparse.Namespace, extra: dict[str, Any]) -> None:
-    out = Path(a.out)
+def _save(model: Any, tok: Any, a: argparse.Namespace, extra: dict[str, Any],
+          out: str | Path | None = None) -> Path:
+    out = Path(out if out is not None else a.out)
     out.mkdir(parents=True, exist_ok=True)
     if hasattr(model, "peft_config"):
         model.save_pretrained(str(out), selected_adapters=["default"])
@@ -246,6 +247,7 @@ def _save(model: Any, tok: Any, a: argparse.Namespace, extra: dict[str, Any]) ->
     (out / "decision_config.json").write_text(json.dumps(
         {"base_model": a.model, "loss": f"grpo_{a.impl}", "lora": hasattr(model, "peft_config"),
          "max_len": a.max_len, "init": a.init, "rewards": a.rewards, **extra}, indent=1))
+    return out
 
 
 # ------------------------------------------------------------------ TRL implementation
@@ -324,6 +326,13 @@ def train_torch(a: argparse.Namespace, rows: list[dict[str, Any]], names: list[s
     rng.shuffle(order)
     cur, log = 0, []
     micro = max(1, a.batch_size // G)  # prompts per forward/backward
+    dev_examples = read_jsonl(a.dev) if a.dev else []
+    ckpt_log: list[dict[str, Any]] = []
+    stopped = False
+    bad_steps = 0
+    dev_best: float | None = None
+    dev_bad = 0
+    dev_key = {"brier": "brier_top1"}.get(a.early_stop_dev_metric, a.early_stop_dev_metric)
 
     def logits(batch_rows: list[dict[str, Any]], grad: bool) -> torch.Tensor:
         enc = col([{"prompt": r["user_prompt"], "target": [0.0] * r["n_options"]} for r in batch_rows])
@@ -367,31 +376,47 @@ def train_torch(a: argparse.Namespace, rows: list[dict[str, Any]], names: list[s
             n_zero += int(sd < 1e-8)
             scale = {"group": sd, "batch": bstd}.get(a.scale_rewards, None)
             adv.append([(x - mu) / (scale + 1e-4) if scale is not None else x - mu for x in rr])
+
+        # A zero-variance group has zero advantage; with skip enabled it contributes nothing to the
+        # policy-gradient term but would still consume a slot in the batch (and can add KL noise).
+        keep = [i for i, rr in enumerate(rew)
+                if not a.skip_zero_std or (len(rr) > 1 and float(torch.tensor(rr).std()) >= 1e-8)]
+        batch_k = [batch[i] for i in keep]
+        samples_k = [samples[i] for i in keep]
+        old_k = [old[i] for i in keep]
+        rew_k = [rew[i] for i in keep]
+        adv_k = [adv[i] for i in keep]
+        ref_lp_k = [ref_lp[i] for i in keep]
+        Pk = len(batch_k)
         stats: dict[str, list[float]] = {"loss": [], "kl": [], "entropy": [], "clipped": []}
         gnorms: list[float] = []
         model.train()
-        for _ in range(a.num_iterations):
-            opt.zero_grad(set_to_none=True)
-            for s in range(0, P, micro):
-                rs = batch[s:s + micro]
-                z = logits(rs, True)
-                K = z.size(1)
-                zz = z.repeat_interleave(G, 0)
-                ev = [[samples[s + j][g]] for j in range(len(rs)) for g in range(G)]
-                o = torch.tensor([old[s + j][g] for j in range(len(rs)) for g in range(G)], device=z.device)
-                ad = torch.tensor([adv[s + j][g] for j in range(len(rs)) for g in range(G)], device=z.device)
-                rf = torch.zeros((len(rs), K), device=z.device)  # padded options are masked inside the loss
-                for j in range(len(rs)):
-                    rf[j, :ref_lp[s + j].numel()] = ref_lp[s + j].to(z.device)
-                rf = rf.repeat_interleave(G, 0)
-                loss, st = grpo_decision_loss(zz, ev, ["choice"] * len(ev), o, ad, rf, temperature=a.temperature,
-                                              clip_eps=a.epsilon, clip_eps_high=a.epsilon_high, kl_beta=a.beta)
-                (loss.sum() / (P * G)).backward()
-                stats["loss"] += loss.detach().float().cpu().tolist()
-                for k in ("kl", "entropy", "clipped"):
-                    stats[k] += st[k].float().cpu().tolist()
-            gnorms.append(float(torch.nn.utils.clip_grad_norm_(params, 1.0)))
-            opt.step()
+        if Pk:
+            for _ in range(a.num_iterations):
+                opt.zero_grad(set_to_none=True)
+                for s in range(0, Pk, micro):
+                    rs = batch_k[s:s + micro]
+                    z = logits(rs, True)
+                    K = z.size(1)
+                    zz = z.repeat_interleave(G, 0)
+                    ev = [[samples_k[s + j][g]] for j in range(len(rs)) for g in range(G)]
+                    o = torch.tensor([old_k[s + j][g] for j in range(len(rs)) for g in range(G)], device=z.device)
+                    ad = torch.tensor([adv_k[s + j][g] for j in range(len(rs)) for g in range(G)], device=z.device)
+                    rf = torch.zeros((len(rs), K), device=z.device)  # padded options are masked inside the loss
+                    for j in range(len(rs)):
+                        rf[j, :ref_lp_k[s + j].numel()] = ref_lp_k[s + j].to(z.device)
+                    rf = rf.repeat_interleave(G, 0)
+                    loss, st = grpo_decision_loss(zz, ev, ["choice"] * len(ev), o, ad, rf, temperature=a.temperature,
+                                                  clip_eps=a.epsilon, clip_eps_high=a.epsilon_high, kl_beta=a.beta)
+                    (loss.sum() / (Pk * G)).backward()
+                    stats["loss"] += loss.detach().float().cpu().tolist()
+                    for k in ("kl", "entropy", "clipped"):
+                        stats[k] += st[k].float().cpu().tolist()
+                gnorms.append(float(torch.nn.utils.clip_grad_norm_(params, 1.0)))
+                opt.step()
+        else:
+            stats = {k: [0.0] for k in stats}
+            gnorms = [0.0]
         row = {"step": step, "reward": sum(flat) / len(flat),
                "acc_sampled": sum(float(k == r["gold"]) for r, acts in zip(batch, samples) for k in acts) / len(flat),
                "frac_zero_std_groups": n_zero / max(1, len(rew)), "grad_norm": sum(gnorms) / max(1, len(gnorms)),
@@ -400,7 +425,50 @@ def train_torch(a: argparse.Namespace, rows: list[dict[str, Any]], names: list[s
         if step % a.logging_steps == 0 or step == steps:
             print("[grpo_trl:torch] " + json.dumps({k: round(v, 5) if isinstance(v, float) else v
                                                     for k, v in row.items()}), flush=True)
-    _save(model, tok, a, {"steps": steps})
+        if a.save_steps and step % a.save_steps == 0 and step != steps:
+            ck = Path(a.out) / f"step-{step:06d}"
+            ev = (evaluate_decisions(model, tok, dev_examples, a.max_len, batch_size=a.dev_batch_size)
+                  if dev_examples else None)
+            _save(model, tok, a, {"step": step, "dev": ev}, out=ck)
+            if ev is not None:
+                (ck / "eval.json").write_text(json.dumps(ev, indent=1))
+            ckpt_log.append({"step": step, "path": str(ck), "dev": ev})
+            print(f"[grpo_trl:torch] checkpoint step {step}: {ck}" +
+                  (f" dev_acc={ev['acc']:.4f}" if ev else ""), flush=True)
+            if ev is not None and dev_key:
+                value = float(ev[dev_key])
+                higher = dev_key == "acc"
+                improved = (dev_best is None or
+                            (value > dev_best + a.early_stop_dev_min_delta if higher
+                             else value < dev_best - a.early_stop_dev_min_delta))
+                if improved:
+                    dev_best, dev_bad = value, 0
+                else:
+                    dev_bad += 1
+                if step >= a.early_stop_min_steps and dev_bad >= a.early_stop_dev_patience:
+                    stopped = True
+                    print(f"[grpo_trl:torch] early stop at step {step}: dev_{dev_key}={value:.5f} "
+                          f"best={dev_best:.5f} patience={dev_bad}", flush=True)
+                    break
+        if a.early_stop_entropy is not None or a.early_stop_zero_std is not None:
+            low_entropy = a.early_stop_entropy is not None and row["entropy"] < a.early_stop_entropy
+            high_zero = a.early_stop_zero_std is not None and row["frac_zero_std_groups"] > a.early_stop_zero_std
+            if step >= a.early_stop_min_steps and (low_entropy or high_zero):
+                bad_steps += 1
+            else:
+                bad_steps = 0
+            if a.early_stop_patience > 0 and bad_steps >= a.early_stop_patience:
+                stopped = True
+                print(f"[grpo_trl:torch] early stop at step {step}: "
+                      f"entropy={row['entropy']:.4f} zero_std={row['frac_zero_std_groups']:.4f} "
+                      f"patience={bad_steps}", flush=True)
+                break
+    out = _save(model, tok, a, {"steps": step, "planned_steps": steps, "early_stopped": stopped,
+                                 "dev_metric": a.early_stop_dev_metric, "best_dev": dev_best})
+    if ckpt_log:
+        with open(out / "checkpoints.jsonl", "w") as f:
+            for r in ckpt_log:
+                f.write(json.dumps(r) + "\n")
     with open(Path(a.out) / "metrics.jsonl", "w") as f:
         for r in log:
             f.write(json.dumps(r) + "\n")
@@ -445,7 +513,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--use-vllm", action="store_true", help="TRL: generate with vLLM (not needed for 1 token)")
     ap.add_argument("--vllm-mode", default="colocate")
     ap.add_argument("--logging-steps", type=int, default=10)
-    ap.add_argument("--save-steps", type=int, default=0)
+    ap.add_argument("--save-steps", type=int, default=0,
+                    help="torch: save + evaluate every N steps under <out>/step-XXXXXX (0 = final only); "
+                         "trl: passed to GRPOConfig")
+    ap.add_argument("--early-stop-entropy", type=float, default=None,
+                    help="torch: stop when mean entropy falls below this for --early-stop-patience steps")
+    ap.add_argument("--early-stop-zero-std", type=float, default=None,
+                    help="torch: stop when frac_zero_std_groups exceeds this for --early-stop-patience steps")
+    ap.add_argument("--early-stop-patience", type=int, default=3,
+                    help="consecutive steps below/above the early-stop threshold")
+    ap.add_argument("--early-stop-min-steps", type=int, default=0,
+                    help="never early-stop before this step")
+    ap.add_argument("--skip-zero-std", action=argparse.BooleanOptionalAction, default=False,
+                    help="torch: drop groups with zero reward variance from the loss (they have zero advantage)")
+    ap.add_argument("--dev-batch-size", type=int, default=16,
+                    help="torch: batch size for checkpoint/final dev evaluation (1 = most stable, slower)")
+    ap.add_argument("--early-stop-dev-metric", choices=["acc", "nll", "brier", "ece"], default=None,
+                    help="torch: stop when this dev metric has not improved for --early-stop-dev-patience evaluations")
+    ap.add_argument("--early-stop-dev-patience", type=int, default=0,
+                    help="torch: consecutive checkpoint evals without dev improvement (0 = disabled)")
+    ap.add_argument("--early-stop-dev-min-delta", type=float, default=0.0,
+                    help="torch: minimum improvement in the dev metric to reset the patience counter")
     ap.add_argument("--report-to", default="none")
     ap.add_argument("--seed", type=int, default=0)
     return ap.parse_args(argv)
@@ -457,6 +545,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     weights = [float(w) for w in a.reward_weights.split(",")] if a.reward_weights else [1.0] * len(names)
     if len(weights) != len(names):
         raise SystemExit("--reward-weights must align with --rewards")
+    if a.early_stop_dev_metric and a.impl != "torch":
+        raise SystemExit("--early-stop-dev-metric is only implemented for --impl torch")
+    if a.early_stop_dev_metric and (a.save_steps <= 0 or a.early_stop_dev_patience <= 0):
+        raise SystemExit("--early-stop-dev-metric needs --save-steps > 0 and --early-stop-dev-patience > 0")
     bf16 = bool(a.bf16 and torch.cuda.is_available())
     from transformers import AutoTokenizer
 
@@ -476,7 +568,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         model, tok, _ = train_torch(a, rows, names, weights, bf16)
     res: dict[str, Any] = {"out": a.out, "rows": len(rows)}
     if a.dev and (a.impl == "torch" or _is_main()):
-        ev = evaluate_decisions(model, tok, read_jsonl(a.dev), a.max_len)
+        ev = evaluate_decisions(model, tok, read_jsonl(a.dev), a.max_len, batch_size=a.dev_batch_size)
         Path(a.out, "eval.json").write_text(json.dumps(ev, indent=1))
         res["dev"] = ev
     print(json.dumps(res, indent=1))

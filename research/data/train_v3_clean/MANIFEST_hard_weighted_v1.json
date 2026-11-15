@@ -1,0 +1,134 @@
+{
+ "version": "train_hard_weighted_v1",
+ "clean_train": "data/train_v3_clean/train.jsonl",
+ "queue": "checkpoints/mine_hard_cases_p1_all/queue.jsonl",
+ "out": "data/train_v3_clean/train_hard_weighted_v1.jsonl",
+ "selected_out": "data/train_v3_clean/train_hard_cases_v1.jsonl",
+ "caps": {
+  "session": 50,
+  "tool": {
+   "shell": 20,
+   "read": 40,
+   "edit": 40,
+   "reply_without_tool": 40,
+   "compress": 40,
+   "grep": 40,
+   "write": 40,
+   "glob": 18,
+   "webfetch": 16,
+   "execute": 16,
+   "not_done": 15,
+   "bash": 14,
+   "shell_run": 8,
+   "shell_wait": 6,
+   "done": 5,
+   "question": 7,
+   "skill": 5,
+   "context7_resolve-library-id": 4,
+   "context7_query-docs": 3,
+   "websearch": 4,
+   "web_fetch": 2,
+   "firecrawl-mcp_firecrawl_search": 2,
+   "web_search": 2,
+   "browse_web": 2,
+   "ask_user_question": 1,
+   "ask_human": 1,
+   "present": 1,
+   "final_result": 1
+  }
+ },
+ "priority_weight": {
+  "P0": 3,
+  "P1": 2,
+  "P2": 2,
+  "P3": 1
+ },
+ "queue_rows": 649,
+ "queue_unique_keys": 649,
+ "selected_hard_cases": 287,
+ "selected_sessions": 39,
+ "selected_by_tool": {
+  "ask_human": 1,
+  "bash": 11,
+  "browse_web": 1,
+  "compress": 31,
+  "context7_query-docs": 2,
+  "context7_resolve-library-id": 2,
+  "done": 1,
+  "edit": 40,
+  "execute": 6,
+  "final_result": 1,
+  "glob": 9,
+  "grep": 27,
+  "not_done": 6,
+  "question": 3,
+  "read": 40,
+  "reply_without_tool": 40,
+  "shell": 20,
+  "shell_run": 5,
+  "shell_wait": 6,
+  "skill": 3,
+  "web_fetch": 2,
+  "web_search": 1,
+  "webfetch": 8,
+  "websearch": 3,
+  "write": 18
+ },
+ "selected_by_session_top": [
+  [
+   "ses_e3fa38decffeZo5PuFEeAC4qaO",
+   50
+  ],
+  [
+   "ses_e4c686b11ffeeT4AnzMyVHESpx",
+   36
+  ],
+  [
+   "ses_e545989bfffe31YmtrqmHVshCm",
+   36
+  ],
+  [
+   "ses_e73cc60c6ffeMDzqysv0QZIdl7",
+   33
+  ],
+  [
+   "da4bd2b11ab8b9cb",
+   13
+  ],
+  [
+   "468fb6f524da322e",
+   13
+  ],
+  [
+   "4911bbf2c3edc9a2",
+   12
+  ],
+  [
+   "49ff346c6f7a19b5",
+   12
+  ],
+  [
+   "ses_e412c857effe4k6E6NddnTc16e",
+   8
+  ],
+  [
+   "fd8961395e9cb1dd",
+   8
+  ]
+ ],
+ "extras": 421,
+ "clean_rows": 2189,
+ "final_rows": 2610,
+ "skipped": {
+  "dev_or_leak": 120,
+  "session_cap": 147,
+  "tool_cap": 35,
+  "truncated": 60
+ },
+ "notes": [
+  "Queue rows already present in clean train are not duplicated as base rows; only weight-1 copies are appended.",
+  "Unseen valid queue rows are appended weight copies.",
+  "Dev/dev_alt/dev_shell rows are never appended.",
+  "Truncated queue rows are excluded."
+ ]
+}

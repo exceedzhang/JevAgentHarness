@@ -1,0 +1,230 @@
+{
+ "version": "train_v3_clean-v1",
+ "source": [
+  "/data1/apps/JevAgentHarness/research/data/train_v3/train.jsonl",
+  "/data1/apps/JevAgentHarness/research/data/train_v3/dev.jsonl"
+ ],
+ "n_source": 2562,
+ "excluded_synthetic": {
+  "dedup-check-4": 1,
+  "grpo-state-check-1": 1,
+  "knockout-check-1": 1
+ },
+ "holdout_sessions": {
+  "dev": [
+   "ses_e27f9491affenDUEuVjrhYiJKj",
+   "ses_e35ef9a6effeLpLaZKjKA2iVte",
+   "ses_e41d19fefffeLSZ7eP216zX1e1",
+   "ses_e41f59941ffeBOrSxRWyCxJLow",
+   "ses_e4627c087ffeNJL07HSRCY6EUB",
+   "ses_e4722a3e1ffeIp199CyxCVD7m4",
+   "ses_e472b82f2ffeqN2rlAy5a5Jhab",
+   "ses_e47301e80ffeDQixRbt5yt3H8e",
+   "ses_e4732a30cffe8776mo4DuH0Ttg",
+   "ses_e6976ef4fffeEk0ykh6w6NTEOR",
+   "ses_ed1bb3420ffefOkl5VtEyqvYvm"
+  ],
+  "dev_alt": [
+   "0ee2e12933b2d6df",
+   "1a573751f77bb9a5",
+   "1cdb3ca649ea6bd6",
+   "298b9b6a49608742",
+   "30af184ba1aa9250",
+   "3ef2ef649ba277c8",
+   "49f54ea123b0c316",
+   "5bd872c970d84ca1",
+   "5d2df237f0d5a43c",
+   "70349e9b3643cb17",
+   "780da9018e39b49c",
+   "79c4a57d46c73044",
+   "7cac5ab1da4142be",
+   "89e760c60cb9b3b7",
+   "8d67847ebea575d4",
+   "9c0f662e0dacfac0",
+   "c09a695e6ebe2164",
+   "c268a7947b16bae4",
+   "cf933a2888029441",
+   "d4770d3249b04db7",
+   "dc9f1093feb1ef2d",
+   "e8cef21f335835ac"
+  ],
+  "dev_shell": [
+   "9187f182bc4a97d5"
+  ]
+ },
+ "splits": {
+  "train": {
+   "n": 2189,
+   "sessions": 105,
+   "max_session_rows": 975,
+   "max_session_share": 0.4454,
+   "by_dp": {
+    "stop": 35,
+    "tool_select": 2154
+   },
+   "by_kind": {
+    "choice": 2189
+   },
+   "by_options": {
+    "2": 101,
+    "6": 36,
+    "7": 6,
+    "15": 1869,
+    "27": 75,
+    "33": 83,
+    "52": 19
+   },
+   "by_tool": {
+    "shell": 767,
+    "edit": 352,
+    "read": 342,
+    "reply_without_tool": 277,
+    "compress": 101,
+    "grep": 67,
+    "final_result": 57,
+    "write": 48,
+    "bash": 37,
+    "done": 24,
+    "shell_run": 24,
+    "execute": 17,
+    "webfetch": 17,
+    "not_done": 11,
+    "glob": 10,
+    "shell_wait": 7,
+    "skill": 7,
+    "question": 5,
+    "web_fetch": 5,
+    "websearch": 4,
+    "browse_web": 3,
+    "ask_human": 2,
+    "context7_query-docs": 2,
+    "context7_resolve-library-id": 2,
+    "web_search": 1
+   },
+   "by_label_tier": {
+    "fast": 1472,
+    "strong": 717
+   },
+   "truncated": 241
+  },
+  "dev": {
+   "n": 264,
+   "sessions": 11,
+   "max_session_rows": 66,
+   "max_session_share": 0.25,
+   "by_dp": {
+    "stop": 9,
+    "tool_select": 255
+   },
+   "by_kind": {
+    "choice": 264
+   },
+   "by_options": {
+    "2": 9,
+    "15": 255
+   },
+   "by_tool": {
+    "shell": 108,
+    "reply_without_tool": 42,
+    "read": 36,
+    "edit": 24,
+    "compress": 10,
+    "grep": 7,
+    "webfetch": 7,
+    "write": 7,
+    "execute": 6,
+    "glob": 6,
+    "done": 5,
+    "not_done": 4,
+    "question": 1,
+    "websearch": 1
+   },
+   "by_label_tier": {
+    "fast": 202,
+    "strong": 62
+   },
+   "truncated": 41
+  },
+  "dev_alt": {
+   "n": 94,
+   "sessions": 22,
+   "max_session_rows": 18,
+   "max_session_share": 0.1915,
+   "by_dp": {
+    "stop": 7,
+    "tool_select": 87
+   },
+   "by_kind": {
+    "choice": 94
+   },
+   "by_options": {
+    "2": 21,
+    "27": 28,
+    "33": 29,
+    "52": 16
+   },
+   "by_tool": {
+    "reply_without_tool": 25,
+    "final_result": 14,
+    "read": 13,
+    "bash": 11,
+    "edit": 9,
+    "done": 5,
+    "context7_query-docs": 2,
+    "context7_resolve-library-id": 2,
+    "firecrawl-mcp_firecrawl_search": 2,
+    "glob": 2,
+    "not_done": 2,
+    "write": 2,
+    "ask_user_question": 1,
+    "present": 1,
+    "question": 1,
+    "web_search": 1,
+    "webfetch": 1
+   },
+   "by_label_tier": {
+    "fast": 51,
+    "strong": 43
+   },
+   "truncated": 6
+  },
+  "dev_shell": {
+   "n": 12,
+   "sessions": 1,
+   "max_session_rows": 12,
+   "max_session_share": 1.0,
+   "by_dp": {
+    "tool_select": 12
+   },
+   "by_kind": {
+    "choice": 12
+   },
+   "by_options": {
+    "7": 12
+   },
+   "by_tool": {
+    "browse_web": 5,
+    "shell_run": 5,
+    "reply_without_tool": 2
+   },
+   "by_label_tier": {
+    "fast": 5,
+    "strong": 7
+   },
+   "truncated": 1
+  }
+ },
+ "checks": {
+  "session_disjoint": true,
+  "row_ids_disjoint": true,
+  "union_equals_non_synthetic_source": true
+ },
+ "notes": [
+  "dev.jsonl is the primary main-harness dev (264 rows).",
+  "dev_alt.jsonl is a separate alt-harness / rare-tool slice; do not concatenate it with dev.jsonl for a single aggregate.",
+  "dev_shell.jsonl is a 12-row shell_run/browse_web diagnostic, not a representative dev; shell_wait has no held-out rows.",
+  "49ff346c6f7a19b5 (38 rows: shell_run 24, shell_wait 7) is in train to improve long-tail coverage.",
+  "The 975-row ses_e3fa38decffeZo5PuFEeAC4qaO session stays in train and is never held out.",
+  "Existing v2/v3 checkpoints cannot be fairly evaluated on these dev files; retrain on train.jsonl for a clean comparison."
+ ]
+}

@@ -137,3 +137,43 @@ always-fast 基线，故"不信任新 routing / 不为其标定"的结论成立�
 **结论（最终）**：routing 头基本无有用信号（对两种 gold 的 AUC 都≈随机）；决策模型价值在
 tool_select（GRPO 后 10.8%→35.1%）。维持 routing 现状（global 0.772 + tau 0.85），不为它标定；
 要让 routing 更强需重训 routing 头或用旧模型。
+
+## 9. train_v2 GRPO 实验记录（两轮）
+
+2026-11-11 在已发布的 `AgentDecision-4B` adapter 上，用 `data/train_v2` 做了两轮
+决策级 GRPO（`--impl torch`，reward=`correct`）。第一轮 1 epoch：dev accuracy
+10.81% → 35.14%，但 NLL/Brier/ECE 变差，且训练后段出现明显 entropy collapse。
+第二轮加了逐 checkpoint dev 评估与早停（G=16、lr=3e-6、beta=0.05）：collapse 明显缓解，
+但 dev top-1 最高为 step 40 的 29.73%，低于第一轮最终点；最佳部署候选不是最终 step 80。
+完整命令、指标、两轮对比与下一步建议见
+[`../results/training/grpo_train_v2_2026-11-11.md`](../results/training/grpo_train_v2_2026-11-11.md)。
+
+## 10. train_v3 重新划分 dev（11-14）
+
+旧 `data/train_v3/dev.jsonl` 只有 81 条 / 14 个 session：其中一个 alt session 占 38 条，
+且 dev 几乎没有 main harness 的 shell/edit 主体；另外有 16 条来自 v2 train。用它做 v2/v3
+模型对比会同时受到分布偏移和泄漏影响。
+
+新的 session-level 划分在 `data/train_v3_clean/`，原始 `data/train_v3` 保持不变：
+
+| split | rows | sessions | 用途 |
+|---|---:|---:|---|
+| `train.jsonl` | 2189 | 105 | 训练（975 条 main session 和 49ff 都留在 train） |
+| `dev.jsonl` | 264 | 11 | **主 dev**，main harness |
+| `dev_alt.jsonl` | 94 | 22 | alt harness + 稀有工具，单独报告 |
+| `dev_shell.jsonl` | 12 | 1 | shell_run / browse_web 诊断，不参与主指标 |
+
+关键规则：
+
+- 不要把 `dev.jsonl` / `dev_alt.jsonl` / `dev_shell.jsonl` 拼成一个 aggregate；
+- `dev.jsonl` 只作为模型选择主指标，alt 和 shell 分开看 per-tool accuracy / confusion；
+- `shell_wait` 没有 held-out 行（7 条都在 train 的 49ff 里），这是当前数据缺口；
+- 旧 v2/v3 checkpoint 都见过这些 dev 行，不能在新 dev 上直接比较，必须在
+  `train_v3_clean/train.jsonl` 上重训。
+
+重建脚本：`scripts/resplit_v3_dev.py --force`；详细说明见
+`data/train_v3_clean/SPLIT.md`。评估脚本已增加 `by_tool` 与 `confusion`。
+
+2026-11-15 已按该 split 做 P1 重训：`dev-acc` 早停在 step 55/137（未跑满 1 epoch），
+最佳 top-1 为 `step-000040`；主 dev 相对 init +3.79 pp，但 NLL/Brier/ECE 都更差。
+结果与对比见 [`../results/training/grpo_train_v3_2026-11-14.md`](../results/training/grpo_train_v3_2026-11-14.md) §12。

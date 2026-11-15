@@ -8,9 +8,10 @@ docs/TRAINING_RECIPES.md §10 and docs/TRAINING_AGENT_BRIEF.md §6.
 
 Scoring goes through ``serve_jev.Engine`` -- the exact prompt, readout, knockout and calibration of the served model
 (``--calibration``) -- so these numbers describe what the harness will see. Per file, per decision point and per
-kind: n, acc (argmax vs the gold = argmax of the target), nll (-sum_a q_a log p_a), brier (top-label confidence vs
-correctness), ece (10 equal-width bins), ece_adaptive, auroc (confidence -> correct), aurc, and the option-order
-**flip rate** (``--n-perm`` random permutations; share of decisions whose chosen option changes), plus wall time.
+kind and gold tool: n, acc (argmax vs the gold = argmax of the target), nll (-sum_a q_a log p_a), brier (top-label
+confidence vs correctness), ece (10 equal-width bins), ece_adaptive, auroc (confidence -> correct), aurc, and the
+option-order **flip rate** (``--n-perm`` random permutations; share of decisions whose chosen option changes), plus
+wall time.  ``by_tool`` / ``confusion`` break the same metrics down by gold tool and by predicted-vs-gold tool.
 """
 
 from __future__ import annotations
@@ -68,16 +69,23 @@ def evaluate(engine: Any, examples: list[dict[str, Any]], n_perm: int = 1, seed:
         gold = max(range(len(q)), key=lambda j: q[j])
         pred = max(range(len(p)), key=lambda j: p[j])
         nll = -sum(v * math.log(max(p[j], 1e-12)) for j, v in enumerate(q) if v)
-        rows.append({"dp": str(e.get("dp")), "kind": str(e.get("kind", "choice")), "conf": float(p[pred]),
-                     "correct": pred == gold, "nll": nll,
+        rows.append({"dp": str(e.get("dp")), "kind": str(e.get("kind", "choice")),
+                     "gold": str(e["options"][gold]), "pred": str(e["options"][pred]),
+                     "conf": float(p[pred]), "correct": pred == gold, "nll": nll,
                      "flip": (sum(x != pred for x in perm_pred[i]) / n_perm) if n_perm else None})
     by_dp: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_kind: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_tool: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    confusion: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for r in rows:
         by_dp[r["dp"]].append(r)
         by_kind[r["kind"]].append(r)
+        by_tool[r["gold"]].append(r)
+        confusion[r["gold"]][r["pred"]] += 1
     return {"overall": _metrics(rows), "by_dp": {k: _metrics(v) for k, v in sorted(by_dp.items())},
             "by_kind": {k: _metrics(v) for k, v in sorted(by_kind.items())},
+            "by_tool": {k: _metrics(v) for k, v in sorted(by_tool.items())},
+            "confusion": {g: dict(sorted(p.items())) for g, p in sorted(confusion.items())},
             "seconds": round(secs, 2), "decisions_per_s": round(len(rows) / secs, 2) if secs > 0 else None}
 
 

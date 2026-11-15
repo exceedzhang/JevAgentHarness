@@ -14,6 +14,7 @@
 #   NUM_GEN [8]   MAX_COMPLETION [1]   TEMPERATURE [1.0]   BETA (KL) [0.02]   LOSS_TYPE [dapo]
 #   SCALE_REWARDS (group|batch|none) [group]   EPSILON [0.2]   EPSILON_HIGH [0.28]   NUM_ITER (mu) [1]
 #   LR [1e-5]   BATCH (completions per device per step) [16]   GRAD_ACCUM [4]   EPOCHS [1]   MAX_STEPS [-1]
+#   SAVE_STEPS [0]   EARLY_STOP_ENTROPY []   EARLY_STOP_ZERO_STD []   EARLY_STOP_PATIENCE [3]   EARLY_STOP_MIN_STEPS [0]
 #   N_PERM (rows per example with fresh option orders) [1]   MAX_LEN [4096]   USE_VLLM [0]   GPUS / DRY_RUN / SEED
 # Prompts per optimizer step (TRL) = BATCH * GRAD_ACCUM * GPUS / NUM_GEN.
 source "$(dirname "$0")/_common.sh"
@@ -39,6 +40,11 @@ source "$(dirname "$0")/_common.sh"
 : "${GRAD_ACCUM:=4}"
 : "${EPOCHS:=1}"
 : "${MAX_STEPS:=-1}"
+: "${SAVE_STEPS:=0}"
+: "${EARLY_STOP_ENTROPY:=}"
+: "${EARLY_STOP_ZERO_STD:=}"
+: "${EARLY_STOP_PATIENCE:=3}"
+: "${EARLY_STOP_MIN_STEPS:=0}"
 : "${N_PERM:=1}"
 : "${MAX_LEN:=4096}"
 : "${USE_VLLM:=0}"
@@ -54,7 +60,14 @@ args=(--impl "$IMPL" --model "$MODEL" --train "$TRAIN" --out "$OUT" --rewards "$
       --beta "$BETA" --loss-type "$LOSS_TYPE" --scale-rewards "$SCALE_REWARDS" --epsilon "$EPSILON"
       --epsilon-high "$EPSILON_HIGH" --num-iterations "$NUM_ITER" --lr "$LR" --batch-size "$BATCH"
       --grad-accum "$GRAD_ACCUM" --epochs "$EPOCHS" --max-steps "$MAX_STEPS" --n-permutations "$N_PERM"
-      --max-len "$MAX_LEN" --seed "$SEED")
+      --max-len "$MAX_LEN" --seed "$SEED" --save-steps "$SAVE_STEPS"
+      --early-stop-patience "$EARLY_STOP_PATIENCE" --early-stop-min-steps "$EARLY_STOP_MIN_STEPS")
+if [[ -n "$EARLY_STOP_ENTROPY" ]]; then
+  args+=(--early-stop-entropy "$EARLY_STOP_ENTROPY")
+fi
+if [[ -n "$EARLY_STOP_ZERO_STD" ]]; then
+  args+=(--early-stop-zero-std "$EARLY_STOP_ZERO_STD")
+fi
 if [[ -n "$INIT" ]]; then
   need "$INIT"
   args+=(--init "$INIT")
