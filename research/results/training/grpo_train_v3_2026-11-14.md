@@ -1,4 +1,4 @@
-# train_v3 决策级 GRPO 训练报告（2026-11-14）
+# train_v3 决策级 GRPO 训练报告（2026-11-14 → 11-15）
 
 > 结论先行：`train_v3` 比 `train_v2` 多了约 63% 的数据，但这次 GRPO 的 dev top-1 只从 **49.38%** 提到 **53.09%**（40/81 → 43/81，**+3 条样本**），且 NLL / Brier / ECE 都变差。它不是“数据无效”，而是**新增数据没有被这次训练真正消费，且新增数据和 dev 的分布不匹配**：104 步 × 8 prompt = 832 个训练 prompt，只覆盖 2481 条 train 的 **33.5%**；zero-std 均值 0.510，折算后有效梯度 prompt 约 **408**，与 v2 第二轮几乎相同。新增数据更多是同一批工具/会话的重复模式，长尾和 dev 重点工具（`shell_run`、`shell_wait`）仍严重不足。
 
@@ -574,7 +574,7 @@ skip-zero-std, lr=3e-6, beta=0.05, max-len=4608
 
 ### 15.2 训练与评估
 
-`init = grpo_train_v3_clean_hard_v2/step-000135`（保留 v2 的 reply 增益），其余配置同 §14.1，max-steps 166。166/166 跑完，~2h；训练中最佳 step160 52.27%，**最终模型 dev 52.65%**（高于途中最佳）。
+`init = grpo_train_v3_clean_hard_v2/step-000135`（保留 v2 的 reply 增益），其余配置同 §14.1，max-steps 166。166/166 跑完，~2h；训练中最佳 step160 52.27%，**最终模型 dev 52.65%**（高于途中最佳）。52.65% 是训练内 eval 口径、51.52%（下段）是 eval_decisions 生产口径，两者差 3 条（139 vs 136/264，评估代码路径不同）；对外汇报以生产口径 51.52% 为准。
 
 eval_decisions（raw，dev 264）：acc **51.52%**，NLL 3.205，ECE 0.422，auroc 0.712，mean_conf 0.934。
 
@@ -590,6 +590,8 @@ eval_decisions（raw，dev 264）：acc **51.52%**，NLL 3.205，ECE 0.422，aur
 | write / webfetch | 7+7 | 14.3% | 14.3% | 14.3% |
 | done / not_done | 5+4 | 40% / 50% | 60% / 0% | 60% / 25% |
 | **整体** | 264 | 50.38% | 50.38% | **51.52%** |
+
+表中 write/webfetch 三轮未被加权、准确率未变（14.3%）；v1 基线列取 `eval_dev_step40.json`（eval_decisions 口径），与 §13.2 的 50.00%（训练内 eval 口径，同一模型）相差 1 条。
 
 vs v1：reply **+28.6 pp**、edit **+8.3 pp**、read −8.3 pp、shell −5.5 pp、整体 +1.1 pp。混淆：reply→reply 17 / shell 13 / read 7；read→read 18 / reply 8 / shell 5；edit→reply 7 / shell 7 / edit 5。
 
@@ -611,7 +613,7 @@ v3 输出过度自信（mean_conf 0.934），用 `calibrate.py`（NLL golden-sec
 
 ### 15.5 结论与下一步
 
-- v3 最终（含校准）全面优于 v1 生产基线：acc 51.52 / 50.38、NLL 1.63 / 2.40、ECE 0.075 / 0.291、reply 40.5 / 11.9、edit 20.8 / 12.5；唯一回退是 read 50.0 vs 58.3（8 条被误判 reply）；
+- v3 最终（含校准）全面优于 v1 生产基线：acc 51.52 / 50.38、NLL 1.63 / 2.40、ECE 0.075 / 0.291、reply 40.5 / 11.9、edit 20.8 / 12.5；唯一回退是 read 50.0 vs 58.3（净 −3 条，其中 8 条被误判 reply）；
 - 弱点仍在：grep 0/7、glob 0/6、compress 1/10（样本少，绝对波动 1-2 条）；
 - 下一步：(1) 观察生产任务质量——routing 不再 fire、中间步全走 fast，若出错率上升可下调 tau 或给 routing 单独设温度；(2) 继续补 grep/glob/compress 的难例与独立 session 的 dev；(3) 生产日志每周挖矿并入下一轮。
 
