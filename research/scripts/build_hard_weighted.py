@@ -31,6 +31,8 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from jevharness.training.mine_hard_cases import TOOL_ALIASES
+
 
 TOOL_CAPS = {
     "shell": 20,
@@ -85,11 +87,16 @@ def key(row: dict[str, Any]) -> str:
 
 
 def gold_tool(row: dict[str, Any]) -> str:
+    """Gold tool, canonicalized through ``TOOL_ALIASES`` (same table the miner uses) so
+    harness-specific spellings (bash/shell_run/shell_wait, question/ask_human/..., ...)
+    share one per-tool cap instead of falling back to separate defaults."""
     mine = row.get("mine") or {}
     if mine.get("tool"):
-        return str(mine["tool"])
-    target = row.get("target") or {}
-    return max(target, key=target.get)
+        name = str(mine["tool"])
+    else:
+        target = row.get("target") or {}
+        name = max(target, key=target.get)
+    return TOOL_ALIASES.get(name, name)
 
 
 def priority(row: dict[str, Any]) -> str:
