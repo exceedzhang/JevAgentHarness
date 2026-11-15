@@ -61,3 +61,19 @@ def test_input_order_preserved():
     rows = [_row(f"s{i}", "read") for i in range(6)]
     sel = select_capped(rows, max_per_tool=10, max_total=4)
     assert [r["meta"]["session"] for r in sel] == ["s0", "s1", "s2", "s3"]
+
+
+def test_alias_family_shares_one_cap():
+    # question / ask_human / ask_user_question are the same capability under different harness
+    # names, so the single "ask_user_question" cap is counted across all three
+    rows = [_row("a", "question"), _row("b", "ask_human"),
+            _row("c", "ask_user_question"), _row("d", "question")]
+    sel = select_capped(rows, max_per_tool=10, tool_caps={"ask_user_question": 2})
+    assert len(sel) == 2
+    assert sorted(r["mine"]["gold"] for r in sel) == ["ask_human", "question"]
+
+
+def test_shell_alias_family_is_excluded_by_zero_cap():
+    rows = [_row("a", "bash"), _row("b", "shell_run"), _row("c", "shell"), _row("d", "edit")]
+    sel = select_capped(rows, max_per_tool=10, tool_caps={"shell": 0, "edit": 5})
+    assert [r["mine"]["gold"] for r in sel] == ["edit"]

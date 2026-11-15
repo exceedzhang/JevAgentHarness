@@ -54,6 +54,20 @@ P2_TOOLS = {
 }
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
+# The same capability is named differently across harness versions (asking the user is
+# "question" / "ask_human" / "ask_user_question"; a shell command is "shell" / "bash", ...).  A
+# per-tool cap must apply to the whole family, so every gold name is canonicalized before the cap
+# lookup and counting; the --tool-caps file only needs the canonical name of each family.
+TOOL_ALIASES: dict[str, str] = {
+    "bash": "shell",
+    "shell_run": "shell",
+    "shell_wait": "shell",
+    "ask_human": "ask_user_question",
+    "question": "ask_user_question",
+    "web_fetch": "webfetch",
+    "web_search": "websearch",
+}
+
 
 def tool_of(ex: dict[str, Any]) -> str:
     """Gold tool = argmax of the target distribution."""
@@ -242,7 +256,9 @@ def select_capped(queue: list[dict[str, Any]], max_per_tool: int = 80, max_total
     across all priorities (``0`` excludes the tool, e.g. to mine non-shell cases only).  Other
     tools keep the per-``(priority, gold tool)`` bucket capped by ``max_per_tool``.
     ``max_per_session`` (0 = unlimited) caps rows per ``(session, tool)`` pair so one long
-    trajectory cannot dominate a single tool while still contributing to several tools.
+    trajectory cannot dominate a single tool while still contributing to several tools.  Tool
+    names are canonicalized through ``TOOL_ALIASES`` so a family of harness-specific names shares
+    one cap (see the constant's comment).
     """
     tool_caps = dict(tool_caps or {})
     capped: list[dict[str, Any]] = []
@@ -251,7 +267,7 @@ def select_capped(queue: list[dict[str, Any]], max_per_tool: int = 80, max_total
     cap_session_tool: Counter[tuple[str, str]] = Counter()
     for row in queue:
         m = row["mine"]
-        tool = m["gold"]
+        tool = TOOL_ALIASES.get(m["gold"], m["gold"])
         if tool in tool_caps:
             if cap_tool[tool] >= tool_caps[tool]:
                 continue
