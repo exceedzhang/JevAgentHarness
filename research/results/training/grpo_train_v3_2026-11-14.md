@@ -520,13 +520,114 @@ skip-zero-std, lr=3e-6, beta=0.05, max-len=4608
 - 审计：`data/train_v3_clean/train_hard_cases_v1.jsonl`、`MANIFEST_hard_weighted_v1.json`
 - 日志：`/tmp/opencode/grpo_hard_v1.log`
 
-## 14. 相关文档
+## 14. 非 shell 难例挖矿第 2 轮：hard_v2（2026-11-15 上午）
+
+### 14.1 数据与配置
+
+按 §13.4 的结论补**非 shell** 难例。工具上限 `data/tool_caps_v2.json`：reply_without_tool 120、edit 80、read 40、compress 40、grep 30、glob 30、write 30、webfetch 16、web 系 8×3、skill 5、done/not_done 5；**shell/bash/shell_run/shell_wait = 0（排除）**。
+
+- Track A：用 hard_v1 step40 对 clean train 2189 打分挖矿 → **354 条**（per-(session,tool) cap 5；首跑 167 条因 per-session cap 被长 session 占满而饿死，`2f7af33` 修复后重跑）；
+- Track B：生产日志 `decisions.jsonl`（9977 行）新行，`--exclude` 全部已用集 → **38 条**（5 sessions，无泄漏）；
+- 合并 392 → selected **340**（61 sessions）+ 按 priority 加权 **616** → `train_hard_weighted_v2.jsonl` = **2805 行**（2189 + 616）；skipped：tool_cap 4 / truncated 48；
+- selected_by_tool：reply 115 / edit 64 / read 40 / compress 20 / grep 21 / glob 10 / write 19 / execute 11 / webfetch 8 / skill 5 / not_done 4 / question 4；top session 35 条 = 加权行的 3.7%；
+- 训练：`init = grpo_train_v3_clean_hard_v1/step-000040`，P=16，max-steps 176，save/dev 每 5，dev-acc 早停 patience 5 / min-steps 60，skip-zero-std，lr 3e-6，beta 0.05，max-len 4608，GPU1。
+
+### 14.2 训练与评估
+
+176/176 步全部跑完（未触发早停），~1h25m。最终模型 dev 49.62% / NLL 2.98 / ECE 0.417；训练中最佳 **step-000135（dev 50.38%）**。
+
+逐工具（dev 264，v2 step135 vs 基线 hard_v1 step40）：
+
+| 工具 | n | v1 | v2 | Δ |
+|---|---:|---:|---:|---:|
+| reply_without_tool | 42 | 11.9% | **31.0%** | **+19.0 pp** |
+| edit | 24 | 12.5% | 16.7% | +4.2 pp |
+| read | 36 | 58.3% | 47.2% | **−11.1 pp** |
+| compress | 10 | 20.0% | 10.0% | −10 pp |
+| shell | 108 | 86.1% | 84.3% | −1.9 pp |
+| **整体** | 264 | 50.38% | 50.38% | 0 |
+
+校准变差：NLL 2.403→2.869，ECE 0.291→0.383，mean_conf 0.784→0.887（过度自信）。
+
+混淆（gold→pred）：reply→reply 13 / shell 12 / read 9；read→read 17 / **reply 8** / shell 6；edit→shell 7 / read 6 / reply 5 / edit 4。
+
+### 14.3 结论
+
+- reply 的改善是真实的：shell 偏置被纠正了一半（42 条里判对 5→13 条）；
+- 但**过校正**：read 步骤 8/36 被误判成 reply，read −11 pp、compress −10 pp，整体被抵消；
+- 验收门：reply≥20% ✅（31.0%）/ edit≥25% ❌（16.7%）/ 整体≥50% ✅ / NLL·ECE 不劣 ❌ → **不部署**；
+- 下一步：降 reply 权重、把 read/edit 提权，用 v2 模型重挖残留错误。
+
+产物：`checkpoints/grpo_train_v3_clean_hard_v2/`（best `step-000135` + `eval_dev_step135.json`）；`data/train_v3_clean/{train_hard_weighted_v2.jsonl, train_hard_cases_v2.jsonl, MANIFEST_hard_weighted_v2.json}`；队列 `checkpoints/mine_nonshell_v2_{train,prod,all}/`；日志 `/tmp/grpo_train_v3_clean_hard_v2.log`。
+
+## 15. 非 shell 难例挖矿第 3 轮：hard_v3 + 温度缩放 + 生产部署（2026-11-15 下午）
+
+### 15.1 数据：降 reply 权重、提 read/edit
+
+工具上限改为 `data/tool_caps_v3.json`：reply **120→50**、edit **80→120**、read **40→120**、compress 40→60、glob 30→12、write 30→40，其余同 v2，shell 系仍为 0。
+
+- Track A：改用 **v2 step135 打分**（挖新模型的残留错误），clean train 2189 → **287 条**（48 sessions）：edit 54 / read 52 / reply 50 / grep 25 / compress 23 / write 19 / execute 12 / glob 10 / web 13，shell 0；
+  - 打分顺带确认了 v2 的 train 逐工具 acc：reply 10.1%→31.4%、edit 17.9%→30.7%、read 40.6%→35.7%（回退）、shell 84.1%；
+- Track B：生产日志（10100 行）新行 → **17 条**（edit 5 / compress 5 / write 3 / reply 2 / read 1 / not_done 1），无泄漏；
+- 合并 304 → selected **263**（49 sessions）+ 加权 **452** → `train_hard_weighted_v3.jsonl` = **2641 行**（2189 + 452）；skipped truncated 41；
+- selected_by_tool：edit 53 / read 46 / **reply 45**（v2 是 115）/ compress 22 / grep 20 / write 18 / glob 10 / execute 11 / webfetch 9；dev/dev_alt/dev_shell 泄漏 0。
+
+### 15.2 训练与评估
+
+`init = grpo_train_v3_clean_hard_v2/step-000135`（保留 v2 的 reply 增益），其余配置同 §14.1，max-steps 166。166/166 跑完，~2h；训练中最佳 step160 52.27%，**最终模型 dev 52.65%**（高于途中最佳）。
+
+eval_decisions（raw，dev 264）：acc **51.52%**，NLL 3.205，ECE 0.422，auroc 0.712，mean_conf 0.934。
+
+| 工具 | n | v1（生产基线）| v2 step135 | **v3 最终** |
+|---|---:|---:|---:|---:|
+| shell | 108 | 86.1% | 84.3% | 80.6% |
+| reply_without_tool | 42 | 11.9% | 31.0% | **40.5%** |
+| read | 36 | 58.3% | 47.2% | **50.0%**（回升）|
+| edit | 24 | 12.5% | 16.7% | **20.8%** |
+| compress | 10 | 20.0% | 10.0% | 10.0% |
+| grep | 7 | 0% | 0% | 0% |
+| glob | 6 | 0% | 0% | 0% |
+| write / webfetch | 7+7 | 14.3% | 14.3% | 14.3% |
+| done / not_done | 5+4 | 40% / 50% | 60% / 0% | 60% / 25% |
+| **整体** | 264 | 50.38% | 50.38% | **51.52%** |
+
+vs v1：reply **+28.6 pp**、edit **+8.3 pp**、read −8.3 pp、shell −5.5 pp、整体 +1.1 pp。混淆：reply→reply 17 / shell 13 / read 7；read→read 18 / reply 8 / shell 5；edit→reply 7 / shell 7 / edit 5。
+
+### 15.3 温度缩放
+
+v3 输出过度自信（mean_conf 0.934），用 `calibrate.py`（NLL golden-section，dev 264）重拟：
+
+- **global T = 3.0251733656628823**
+- **choice:6-16 T = 2.9999808412939433**
+
+缩放后（`eval_decisions --calibration`）：acc 不变（argmax 不变）、**NLL 3.21→1.63、ECE 0.42→0.075**、mean_conf 0.93→0.58、auroc 0.715。校准完全修复，`checkpoints/grpo_train_v3_clean_hard_v3/calibration.json`。
+
+### 15.4 生产部署（11-15）
+
+- v3 adapter 手工部署到生产决策服务（GPU0 4B vLLM）；
+- 生产配置 `decision.calibration` 全量替换：global 0.772→**3.025**、choice:6-16 2.508→**3.0**，旧模型桶（noul:2 / choice:17-52 / choice:3-5）删除（commit `23816a9`）；
+- 已批准的行为变化：global 抬到 3.025 把 routing 的 p(hard) 压平，线上验证 1 小时 53 条决策行：p_hard 0.094–0.359（此前中位 ~0.81）→ **fires@tau0.85 从 ~38% 降到 ~2-3%**，绝大多数步走 fast，strong 只剩 first-step + finish check；
+- 工具上限文件入库：commit `fcebf74`（tool_caps_v2/v3.json）。
+
+### 15.5 结论与下一步
+
+- v3 最终（含校准）全面优于 v1 生产基线：acc 51.52 / 50.38、NLL 1.63 / 2.40、ECE 0.075 / 0.291、reply 40.5 / 11.9、edit 20.8 / 12.5；唯一回退是 read 50.0 vs 58.3（8 条被误判 reply）；
+- 弱点仍在：grep 0/7、glob 0/6、compress 1/10（样本少，绝对波动 1-2 条）；
+- 下一步：(1) 观察生产任务质量——routing 不再 fire、中间步全走 fast，若出错率上升可下调 tau 或给 routing 单独设温度；(2) 继续补 grep/glob/compress 的难例与独立 session 的 dev；(3) 生产日志每周挖矿并入下一轮。
+
+产物：`checkpoints/grpo_train_v3_clean_hard_v3/`（最终 adapter 264MB + `calibration.json` + `eval_dev_final.json` + 33 个 step 子目录）；`data/train_v3_clean/{train_hard_weighted_v3.jsonl(2641), train_hard_cases_v3.jsonl(263), MANIFEST_hard_weighted_v3.json}`；队列 `checkpoints/mine_nonshell_v3_{train,prod,all}/`；日志 `/tmp/grpo_train_v3_clean_hard_v3.log`。
+
+**现状（11-15 收工）：** 生产决策模型 = 本轮 hard_v3 最终模型 + 温度缩放（global 3.025 / choice:6-16 3.0）；dev 51.52% / NLL 1.63 / ECE 0.075；reply 40.5%、edit 20.8%；GPU1 Embedding 已恢复。
+
+## 16. 相关文档
 
 - train_v2 / train_v3 对比记录：`results/training/grpo_train_v2_2026-11-11.md` §12
 - clean dev 划分说明：`data/train_v3_clean/SPLIT.md`
 - 数据说明：`docs/DECISION_DATA_V2.md`
 - 训练配方：`docs/TRAINING_RECIPES.md`
 - 脚本：`scripts/train/60_grpo_trl.sh`
+- 非 shell 难例挖矿（§14/§15）：`src/jevharness/training/mine_hard_cases.py`、`scripts/build_hard_weighted.py`、工具上限 `data/tool_caps_v2.json` / `data/tool_caps_v3.json`
+- 校准与评估（§15.3）：`src/jevharness/training/calibrate.py`、`src/jevharness/training/eval_decisions.py`
 
 ---
 
