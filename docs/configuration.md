@@ -195,7 +195,8 @@ only logs. [docs/modes.md](modes.md) describes every mode, what the paper found 
 preset: shadow                       # route | paper | safe | shadow
 decisions:
   routing:     {mode: cascade}       # off | shadow | cascade | guard; tau defaults to router.tau
-  tool_select: {mode: cascade, tau: 0.97, tier: fast, k: 5, min_tools: 12, max_options: 100, force: true}
+  tool_select: {mode: cascade, tau: 0.97, tool_tau: {bash: 0.9}, tier: fast, k: 5, min_tools: 12, max_options: 100, force: true}
+                                      # tool_tau: per-tool thresholds (jah fit suggests them); `tau` applies to the other tools
   stop:        {mode: strong}        # off | shadow | strong | guard | trigger; tau 0.9, scope: fast | all,
                                      # submit: [...] (calls that end the turn, e.g. mini-swe-agent's)
   reflection:  {mode: off}           # off | shadow | trigger | always; tau 0.8, every: 5

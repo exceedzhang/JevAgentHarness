@@ -85,6 +85,37 @@ def test_fit_stop():
     assert f["tau"] == 0.97 and f["agreement"] == 1.0 and f["coverage"] == 0.5
 
 
+def test_fit_per_tool_thresholds():
+    """The global threshold must clear the target on every tool at once; per-tool thresholds let each earn its own."""
+    recs = [tool_rec(1.0, True, choice="bash") for _ in range(100)]
+    recs += [tool_rec(1.0, False, choice="read") for _ in range(100)]
+    f = F.fit(recs)["points"]["tool_select"]
+    assert f["tau"] is None                                    # global: 100 of 200 agree = 50% < 95%
+    pt = f["per_tool"]
+    assert set(pt) == {"bash", "read"}
+    assert pt["bash"]["tau"] == 1.0 and pt["bash"]["agreement"] == 1.0
+    assert pt["read"]["tau"] is None and "no threshold" in pt["read"]["note"]
+    assert pt["read"]["best"]["agreement"] == 0.0              # the best effort is still reported
+    assert pt["bash"]["n_labelled"] == 100
+    assert pt["bash"]["coverage"] == 0.5                       # a share of ALL labelled decisions, not bash's own
+    # a tool with too few labelled decisions is left out of per_tool
+    few = recs + [tool_rec(1.0, True, choice="grep") for _ in range(5)]
+    pt2 = F.fit(few)["points"]["tool_select"]["per_tool"]
+    assert "grep" not in pt2
+    # exactly min_count labelled decisions qualifies (>= boundary); one fewer does not
+    few2 = recs + [tool_rec(1.0, True, choice="grep") for _ in range(30)]
+    assert "grep" in F.fit(few2)["points"]["tool_select"]["per_tool"]
+    # the snippet keeps the default tau and adds the per-tool one that passed
+    snip = F.snippet(F.fit(recs))
+    line = next(ln for ln in snip.splitlines() if ln.strip().startswith("tool_select:"))
+    assert line.strip().startswith("tool_select: {tau: 0.99, tool_tau: {bash: 1}}    #")
+    assert "read" not in line
+    # when the global qualifies too, the per-tool matches it and is dropped from the snippet (it changes nothing)
+    same = [tool_rec(0.99, True, choice="bash") for _ in range(100)]
+    s2 = F.snippet(F.fit(same))
+    assert "tool_select: {tau: 0.99}" in s2 and "tool_tau" not in s2
+
+
 def test_fit_rounds_up_to_a_round_threshold():
     recs = [tool_rec(0.9834, True) for _ in range(80)] + [tool_rec(0.5, False) for _ in range(80)]
     assert F.fit(recs)["points"]["tool_select"]["tau"] == 0.99 or \

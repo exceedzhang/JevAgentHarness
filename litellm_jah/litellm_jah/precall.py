@@ -27,6 +27,7 @@ from .points import (
     STOP_TRIGGER,
     STOP_TRIGGER_NOTE,
     TOOL_TEXT,
+    tool_gate,
     tool_options,
     used_tools,
     with_notes,
@@ -164,18 +165,20 @@ class JahPreCall(CustomLogger):
                     a.effect = "error_defer"
                 elif a.choice == NO_TOOL:
                     a.effect = "defer_no_tool"
-                elif (a.confidence or 0.0) < ts.tau:
-                    a.effect = "defer_unsure"
-                elif fired or rec.reason not in MOVABLE:
-                    a.effect = f"defer_{rec.reason}" # a hard or forced-strong step stays the strong tier's
                 else:
-                    tier = self._cascade_tier(ts)
-                    a.acted, a.effect = True, "forced" if ts.force else "tier"
-                    a.extra["forced_tool"] = a.choice
-                    sess.decided[step] = {**sess.decided[step], "tier": tier, "reason": "tool_cascade"}
-                    if tier != rec.tier:
-                        commit(sess, tier)
-                    force = a.choice if ts.force else None
+                    t = tool_gate(a, ts)
+                    if (a.confidence or 0.0) < t:
+                        a.effect = "defer_unsure"
+                    elif fired or rec.reason not in MOVABLE:
+                        a.effect = f"defer_{rec.reason}"  # a hard or forced-strong step stays the strong tier's
+                    else:
+                        tier = self._cascade_tier(ts)
+                        a.acted, a.effect = True, "forced" if ts.force else "tier"
+                        a.extra["forced_tool"] = a.choice
+                        sess.decided[step] = {**sess.decided[step], "tier": tier, "reason": "tool_cascade"}
+                        if tier != rec.tier:
+                            commit(sess, tier)
+                        force = a.choice if ts.force else None
             elif not a.ok:
                 a.effect = "error_all_tools"
             else:

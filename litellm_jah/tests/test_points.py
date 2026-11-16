@@ -80,11 +80,26 @@ def test_validate_yaml_off_is_not_false():
     ({"action": {"on_error": "retry"}}, "bad on_error"),
     ({"stop": {"submit": "[unclosed"}}, "bad regex"),
     ({"tool_select": {"max_options": 256}}, "too many options"),
+    ({"tool_select": {"tool_tau": ["bash"]}}, "tool_tau not a mapping"),
+    ({"tool_select": {"tool_tau": {"bash": 1.5}}}, "tool_tau out of range"),
+    ({"stop": {"tool_tau": {"bash": 0.9}}}, "tool_tau on the wrong point"),
     ({"stop": 42}, "not a mapping"),
 ])
 def test_validate_rejects_bad_blocks(block, why):
     with pytest.raises(ValueError, match="decisions|must|expected"):
         validate(block)
+
+
+def test_tool_tau_normalization_and_tau_for():
+    d = resolve(0.75, True, None,
+                {"tool_select": {"mode": "cascade", "tau": 0.99, "tool_tau": {"bash": 0.9, "read": 0.85}}})
+    ts = d.tool_select
+    assert ts.tau_for("bash") == 0.9 and ts.tau_for("read") == 0.85
+    assert ts.tau_for("web_search") == 0.99 and ts.tau_for(NO_TOOL) == 0.99  # the rest keep the point tau
+    assert ts.tool_tau == (("bash", 0.9), ("read", 0.85))
+    other = resolve(0.75, True, None,
+                    {"tool_select": {"mode": "cascade", "tool_tau": {"bash": 0.9, "read": 0.85}}})
+    assert ts == other.tool_select and len({ts, other.tool_select}) == 1  # hashable: a dict key in the hooks
 
 
 def test_every_preset_is_valid():

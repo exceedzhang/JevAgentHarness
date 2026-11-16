@@ -90,6 +90,27 @@ def test_tool_select_cascade_forces_the_tool(run):
     run(main())
 
 
+def test_tool_select_cascade_applies_the_per_tool_tau(run):
+    """A fitted per-tool threshold (tool_tau) overrides the point tau for that tool only."""
+    async def main():
+        backend = Scripted({
+            "next_step": lambda q: Decision(p={"routine": 0.8, "hard": 0.2}),
+            "next_tool": lambda q: answer(q, "bash", 0.92),  # below the 0.99 point tau, above bash's 0.9
+        })
+        cfg = JAHCfg(decisions={"tool_select": {"mode": "cascade", "tau": 0.99, "tool_tau": {"bash": 0.9}}})
+        engine = JAHRouter(cfg, backend=backend)
+        out = await run_hook(engine, rd(msgs(2)))
+        assert out["tool_choice"] == {"type": "function", "function": {"name": "bash"}}
+        sess = await engine.store.get("s1")
+        assert sess.decided[2]["reason"] == "tool_cascade" and sess.decided[2]["tier"] == "fast"
+        a = await sess.pending["tool_select"]
+        assert a.effect == "forced" and a.extra.get("tau_effective") == 0.9
+        sess.pending = {}
+        await engine.close()
+
+    run(main())
+
+
 def test_tool_select_cascade_defers_when_unsure(run):
     async def main():
         backend = Scripted({

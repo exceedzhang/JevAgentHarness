@@ -43,6 +43,7 @@ from .points import (
     resp_tool_calls,
     submit_re,
     tc_name,
+    tool_gate,
     tool_guard_note,
     with_notes,
 )
@@ -294,9 +295,11 @@ class JahPostCall(CustomLogger):
         if not a.ok:
             a.effect = "error_accept"
             return _Verdict(False, "tool_guard", asks=[a])
-        if a.choice != "reply_without_tool" and (a.confidence or 0.0) >= c.tau and a.choice != a.label:
-            a.acted, a.effect = True, "redo"
-            return _Verdict(True, "tool_guard", tool_guard_note(resp), [a])
+        if a.choice != "reply_without_tool":
+            t = tool_gate(a, c)
+            if (a.confidence or 0.0) >= t and a.choice != a.label:
+                a.acted, a.effect = True, "redo"
+                return _Verdict(True, "tool_guard", tool_guard_note(resp), [a])
         a.effect = "accepted"
         return _Verdict(False, "tool_guard", asks=[a])
 

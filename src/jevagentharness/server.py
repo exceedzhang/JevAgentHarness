@@ -341,15 +341,17 @@ class Proxy:
                     a.effect = "error_defer"
                 elif a.choice == P.NO_TOOL:
                     a.effect = "defer_no_tool"
-                elif (a.confidence or 0.0) < ts.tau:
-                    a.effect = "defer_unsure"
-                elif fired or st.reason not in MOVABLE:
-                    a.effect = f"defer_{st.reason}"            # a hard or forced-strong step stays the strong tier's
                 else:
-                    a.acted, a.effect = True, "forced" if ts.force else "tier"
-                    a.extra["forced_tool"] = a.choice
-                    st.tier, st.reason = self._cascade_tier(st), "tool_cascade"
-                    force = a.choice if ts.force else None
+                    t = self._tool_gate(a, ts)
+                    if (a.confidence or 0.0) < t:
+                        a.effect = "defer_unsure"
+                    elif fired or st.reason not in MOVABLE:
+                        a.effect = f"defer_{st.reason}"      # a hard or forced-strong step stays strong's
+                    else:
+                        a.acted, a.effect = True, "forced" if ts.force else "tier"
+                        a.extra["forced_tool"] = a.choice
+                        st.tier, st.reason = self._cascade_tier(st), "tool_cascade"
+                        force = a.choice if ts.force else None
             elif not a.ok:
                 a.effect = "error_all_tools"
             else:
@@ -373,6 +375,15 @@ class Proxy:
     def _cascade_tier(self, st: _Step) -> str:
         t = st.dc.tool_select.tier
         return st.rc.fast if t in (None, "fast") else st.rc.strong if t == "strong" else str(t)
+
+    @staticmethod
+    def _tool_gate(a: P.Ask, cfg: P.PointCfg) -> float:
+        """The threshold for the model's choice (its fitted per-tool one, else the point's), logged on the ask
+        when a per-tool threshold applied."""
+        t = cfg.tau_for(a.choice)
+        if t != cfg.tau:
+            a.extra["tau_effective"] = t
+        return t
 
     @staticmethod
     def _shape(req: Request, force: str | None, keep: list[str] | None) -> Request:
@@ -441,9 +452,11 @@ class Proxy:
         if not a.ok:
             a.effect = "error_accept"
             return _Verdict(False, "tool_guard", asks=[])
-        if a.choice != P.NO_TOOL and (a.confidence or 0.0) >= c.tau and a.choice != a.label:
-            a.acted, a.effect = True, "redo"
-            return _Verdict(True, "tool_guard", P.tool_guard_note(resp), [])
+        if a.choice != P.NO_TOOL:
+            t = self._tool_gate(a, c)
+            if (a.confidence or 0.0) >= t and a.choice != a.label:
+                a.acted, a.effect = True, "redo"
+                return _Verdict(True, "tool_guard", P.tool_guard_note(resp), [])
         a.effect = "accepted"
         return _Verdict(False, "tool_guard")
 

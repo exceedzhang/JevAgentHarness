@@ -48,7 +48,7 @@ NOT_OFFERED = {
 }
 KEYS: dict[str, set[str]] = {
     "routing": {"mode", "tau"},
-    "tool_select": {"mode", "tau", "k", "min_tools", "max_options", "tier", "force"},
+    "tool_select": {"mode", "tau", "tool_tau", "k", "min_tools", "max_options", "tier", "force"},
     "stop": {"mode", "tau", "scope", "submit"},
     "reflection": {"mode", "tau", "every"},
     "action": {"mode", "tau", "prefilter", "tools", "patterns", "on_error"},
@@ -72,6 +72,7 @@ class PointCfg:
     point: str
     mode: str = "off"
     tau: float = 0.5
+    tool_tau: tuple[tuple[str, float], ...] = ()   # tool_select: per-tool thresholds (tool, tau); the rest use tau
     k: int = 5                      # tool_select assist: keep the k likeliest tools
     min_tools: int = 12             # tool_select assist: only shortlist requests with at least this many tools
     max_options: int = 100          # tool_select: options per question (more tools: a two-round knockout)
@@ -88,6 +89,13 @@ class PointCfg:
     @property
     def on(self) -> bool:
         return self.mode != "off"
+
+    def tau_for(self, option: str | None) -> float:
+        """The threshold for one option of a tool choice: its fitted per-tool threshold, else the point's own."""
+        for tool, t in self.tool_tau:
+            if tool == option:
+                return t
+        return self.tau
 
 
 @dataclass(frozen=True)
@@ -133,6 +141,21 @@ def _norm_point(point: str, v: Any, where: str) -> dict[str, Any]:
         if not 0.0 <= t <= 1.0:
             raise ValueError(f"{where}.{point}.tau must be in [0, 1], got {d['tau']!r}")
         d["tau"] = t
+    if "tool_tau" in d and d["tool_tau"] is not None:
+        tt = d["tool_tau"]
+        if isinstance(tt, (tuple, list)) and all(isinstance(x, (tuple, list)) and len(x) == 2 for x in tt):
+            tt = dict(tt)                   # already normalized (a validated block validated again)
+        if not isinstance(tt, Mapping) or not tt:
+            raise ValueError(f"{where}.{point}.tool_tau must be a mapping like {{bash: 0.9}}, got {tt!r}")
+        norm: list[tuple[str, float]] = []
+        for tool, v in tt.items():
+            if not isinstance(tool, str) or not tool:
+                raise ValueError(f"{where}.{point}.tool_tau: tool names must be non-empty strings, got {tool!r}")
+            t = float(v)
+            if not 0.0 <= t <= 1.0:
+                raise ValueError(f"{where}.{point}.tool_tau[{tool!r}] must be in [0, 1], got {v!r}")
+            norm.append((tool, t))
+        d["tool_tau"] = tuple(sorted(norm))
     for k, lo, hi in (("k", 1, None), ("min_tools", 0, None), ("every", 1, None), ("max_options", 2, 255)):
         if k in d:
             try:

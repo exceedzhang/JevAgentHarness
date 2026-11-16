@@ -130,6 +130,43 @@ def test_tool_cascade_forces_the_tool_on_the_fast_tier(run, tmp_path):
     assert d[1]["fit_ok"] is True and d[1]["label"] == "bash"
 
 
+def test_tool_cascade_applies_the_per_tool_tau(run, tmp_path):
+    """A fitted per-tool threshold (tool_tau) overrides the point tau for that tool only."""
+    fake = FakeGemini(lambda m, b: (200, call_reply("bash", {"command": "ls"})))
+    dec = ScriptedDecision({"next_tool": [{"bash": 0.92}, {"search": 0.95}],
+                            "next_step": {"routine": 0.9, "hard": 0.1}})
+    sets = ["decisions.tool_select={mode: cascade, tau: 0.99, tool_tau: {bash: 0.9}}", "decisions.routing=off"]
+    run(serve(fake, tmp_path, dec, sets, [body(1), body(2)]))
+    # step 1: bash at 0.92 defers at tau 0.99 but forces at bash's 0.9; step 2: search at 0.95 has no
+    # per-tool threshold, so the global 0.99 defers it
+    assert [s["reason"] for s in steps(tmp_path)] == ["tool_cascade", "routing_off"]
+    d = decisions(tmp_path, "tool_select")
+    assert [(r["effect"], r.get("tau_effective")) for r in d] == [("forced", 0.9), ("defer_unsure", None)]
+    assert fcc(fake.requests[0][1])["allowedFunctionNames"] == ["bash"] and fcc(fake.requests[1][1]) is None
+
+
+def test_tool_tau_config_normalization_and_tau_for():
+    from jevagentharness.config import load_config
+    c = load_config(None, ['decisions.tool_select={mode: cascade, tau: 0.99, tool_tau: {bash: 0.9, read: 0.85}}'])
+    ts = c.decisions_for(c.models["jah-auto"]).tool_select
+    assert ts.tau_for("bash") == 0.9 and ts.tau_for("read") == 0.85
+    assert ts.tau_for("search") == 0.99 and ts.tau_for(P.NO_TOOL) == 0.99     # the rest keep the point tau
+    assert ts.tool_tau == (("bash", 0.9), ("read", 0.85))
+    other = load_config(None, ['decisions.tool_select={mode: cascade, tool_tau: {bash: 0.9, read: 0.85}}'])
+    ts2 = other.decisions_for(other.models['jah-auto']).tool_select
+    assert ts == ts2 and len({ts, ts2}) == 1                               # hashable and equal: a server key
+
+
+def test_tool_guard_applies_the_per_tool_tau(run, tmp_path):
+    """In guard mode a per-tool threshold can trigger a redo where the point tau would not."""
+    fake = FakeGemini(lambda m, b: (200, call_reply("read_file", {"command": "a.py"})))
+    dec = ScriptedDecision({"next_tool": {"bash": 0.6}})
+    sets = ["decisions.tool_select={mode: guard, tau: 0.99, tool_tau: {bash: 0.5}}", "decisions.routing=off"]
+    run(serve(fake, tmp_path, dec, sets, [body(1)]))
+    d = decisions(tmp_path, "tool_select")
+    assert [(r["effect"], r.get("tau_effective")) for r in d] == [("redo", 0.5)]
+
+
 def test_tool_cascade_leaves_hard_steps_to_the_strong_tier(run, tmp_path):
     fake = FakeGemini(lambda m, b: (200, call_reply("bash", {"command": "ls"})))
     dec = ScriptedDecision({"next_tool": {"bash": 1.0}, "next_step": [{"hard": 0.9}, {"hard": 0.1}]})
@@ -703,6 +740,9 @@ def test_config_rejects_bad_decisions():
                      ("decisions.stop=assist", "must be one of"), ("decisions.action={mode: guard, k: 3}", "unknown"),
                      ("decisions.tool_select={mode: cascade, tau: 1.5}", "tau"), ("preset=fast", "unknown preset"),
                      ("decisions.tool_select={mode: cascade, tier: nope}", "unknown tier"),
+                     ("decisions.tool_select={mode: cascade, tool_tau: ['bash']}", "tool_tau"),
+                     ("decisions.tool_select={mode: cascade, tool_tau: {bash: 1.5}}", "tool_tau"),
+                     ("decisions.stop={mode: strong, tool_tau: {bash: 0.9}}", "unknown"),
                      ("decisions.action={mode: guard, patterns: ['(']}", "bad regex"),
                      ('models={"x": {"tier": "strong", "decisions": {"routing": "guard"}}}', "pinned")]:
         with pytest.raises(ValueError, match=msg):

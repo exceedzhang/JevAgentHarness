@@ -196,6 +196,34 @@ def test_tool_guard_redoes_when_the_model_chose_else(run):
     run(main())
 
 
+def test_tool_guard_applies_the_per_tool_tau(run):
+    """In guard mode a per-tool threshold can trigger a redo where the point tau would not."""
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, _ = make_engine(
+                {"next_tool": lambda q: answer(q, "bash", 0.6)},
+                {"tool_select": {"mode": "guard", "tau": 0.99, "tool_tau": {"bash": 0.5}}},
+                log_dir=tmp)
+            m = msgs(2)
+            await engine.decide(m, {"session_id": "s1"})
+            await JahPreCall(engine=engine).async_pre_call_hook(None, None, rd(m, model="jah-auto"), "completion")
+            seen = []
+
+            async def recall(model, messages, tools, request_data):
+                seen.append(messages)
+                return resp(tool_calls=[tool("read_file")], model="g-strong")
+
+            out = await hook(engine, recall).async_post_call_success_deployment_hook(
+                rd(m), resp(tool_calls=[tool("read_file")]), "completion")
+            assert out is not None and out.model == "g-strong"
+            assert seen and "A check doubts" in seen[0][-1]["content"]
+            rows = [r for r in decision_rows(tmp) if r["point"] == "tool_select"]
+            assert rows[0]["effect"] == "redo" and rows[0]["tau_effective"] == 0.5
+            await engine.close()
+
+    run(main())
+
+
 def test_tool_guard_accepts_when_the_model_agrees(run):
     async def main():
         engine, _ = make_engine(

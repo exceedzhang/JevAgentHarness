@@ -24,7 +24,7 @@ verify_finish: true
 # decision points (tool select, stop, reflection, action) — a preset and/or per-point overrides.
 # preset: route # route (the default) | paper | safe | shadow (log everything, for `jah fit`)
 # decisions:
-#   tool_select: {mode: shadow} # shadow | assist | cascade | guard (+ tau, k, min_tools, max_options, tier, force)
+#   tool_select: {mode: shadow} # shadow | assist | cascade | guard (+ tau, tool_tau: {tool: tau}, k, min_tools, max_options, tier, force)
 #   stop: {mode: guard} # strong (the finish check) | guard | shadow | trigger (+ tau, scope: fast|all, submit: [regex])
 #   reflection: {mode: trigger} # trigger | shadow | always (+ tau, every)
 #   action: {mode: guard} # guard | shadow (+ tau, prefilter: risky|command|all, tools/patterns: [regex], on_error)

@@ -142,7 +142,9 @@ decisions:
   tool_select: {mode: cascade, tau: 0.98}     # ... except confident tool choices, which the fast tier fills in
 ```
 
-Options: `tau` (default 0.99), `tier` (`fast`, `strong` or a tier name), `force` (default true; false only picks the
+Options: `tau` (default 0.99), `tool_tau` (per-tool thresholds, a map `{tool: tau}`; the cascade and the guard apply
+a tool's own threshold when the model is confident in that tool, and `tau` for everything else; `jah fit` suggests
+one from logged runs), `tier` (`fast`, `strong` or a tier name), `force` (default true; false only picks the
 tier and lets the LLM choose the tool, for upstreams that reject a forced `tool_choice`), `k`, `min_tools`,
 `max_options`. A forced call is sent as Gemini's `functionCallingConfig {mode: ANY, allowedFunctionNames: [tool]}`,
 OpenAI Chat's `tool_choice: {type: function, function: {name}}` or the Responses API's
@@ -244,6 +246,13 @@ rate (default 95%), on at least `--min-count` decisions (default 30), judged by 
 Requests that offered a single tool (mini-swe-agent's `bash`, plus "reply without a tool") are left out of the
 `tool_select` fit and counted as `single_tool`: there agreement only says that the agent calls its one tool, and a
 cascade fitted on them would move almost every step to the fast tier, whatever the step needs.
+
+The same fit also runs **per tool**: the global threshold must clear the target on *every* tool at once, so a few
+unreliable tools hold the whole point back. In the output, `per_tool` (JSON) and the per-tool table show each tool's
+own fit on the labelled decisions whose top option was that tool; the config snippet emits the tools that qualified as
+`tool_tau: {tool: tau}` next to the point's `tau`, and the other tools keep `tau`. A per-tool threshold acts only in
+the `cascade` and `guard` modes, on that tool's own confidence (a decision that was confident in `bash` is never
+judged against `read`'s threshold).
 
 Routing, reflection and action decisions have no such label in a proxy log (nobody knows what the other tier, or the
 agent without the pause, would have done). `jah fit` describes them, with how often each would fire at the logged tau,

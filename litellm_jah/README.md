@@ -272,6 +272,9 @@ Presets: `route` (the default: routing + finish check), `paper` (+ the paper's t
 (+ the action guard), `shadow` (every point in shadow mode, to log labelled data for `jah fit`). A point's
 config is `{mode: ..., tau: ..., ...}`; see `config.example.yaml` for the per-point keys (`k`, `min_tools`,
 `max_options`, `tier`, `force`, `scope`, `submit`, `every`, `prefilter`, `tools`, `patterns`, `on_error`).
+`tool_select` additionally takes `tool_tau: {tool: tau}` — per-tool thresholds: the cascade and the guard apply a
+tool's own threshold when the decision model is confident in that tool, and `tau` for everything else
+(`jah fit` suggests them in its `tool_tau` snippet).
 
 **Pre-call** (`jah_pre_call`): with the request, the questions that can still change the step are launched:
 tool select, the stop trigger, a triggered reflection. The deciding ones (the stop trigger, a triggered

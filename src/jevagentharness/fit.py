@@ -13,6 +13,10 @@ does not pass. If no threshold qualifies, the LLM should keep that decision (mod
                  Labels: ``shadow`` and ``guard`` logs, and ``cascade`` steps it did not take. Requests that offered
                  a single tool are left out: there "agreement" only says that the agent calls its one tool, and a
                  cascade fitted on them would move almost every step to the fast tier, whatever the step needs.
+                 The global threshold must clear the target on *every* tool at once, so a few unreliable tools hold it
+                 up. The same fit also runs per tool (`per_tool` in the output, `tool_tau` in the config snippet): a
+                 tool gets its own threshold when its own labelled decisions (those whose top option was that tool)
+                 clear the target; the other tools keep the global/default threshold.
 ``stop``         would accept the fast tier's final reply when p(done) >= tau; agrees when the strong tier also ended
                  the turn. Labels: ``stop: shadow`` logs (every fast-tier final reply is redone by the strong tier).
 
@@ -30,7 +34,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
 
-from .points import NO_TOOL
+from .points import NO_TOOL, TAU
 
 FITTED = ("tool_select", "stop")
 
@@ -114,6 +118,34 @@ def _at(recs: list[dict[str, Any]], point: str, t: float, z: float) -> dict[str,
             "agreement": round(k / n, 4) if n else None, "lower": round(wilson_lower(k, n, z), 4) if n else None}
 
 
+def _fit_one_tool(recs: list[dict[str, Any]], point: str, target: float, min_count: int, z: float,
+                  denom: int) -> dict[str, Any]:
+    """The threshold of one tool, fitted on the labelled decisions whose top option was that tool. ``agreement``
+    there is the share of them the LLM actually called, and ``coverage`` is the share of *all* labelled decisions
+    the fitted threshold would act on."""
+    out: dict[str, Any] = {"n_labelled": len(recs), "tau": None}
+    scores = sorted({round(float(r["confidence"]), 4) for r in recs if r.get("confidence") is not None})
+    best: dict[str, Any] | None = None
+    best_t = None
+    for t in scores:
+        st = _at(recs, point, t, z)
+        st["coverage"] = round(st["n_accepted"] / denom, 4) if denom else 0.0
+        if st["lower"] is not None and (best is None or st["lower"] > best["lower"]):
+            best, best_t = st, t
+        if st["n_accepted"] >= min_count and (st["lower"] or 0.0) >= target:
+            nice = min(1.0, math.ceil(t * 100 - 1e-9) / 100)
+            st2 = _at(recs, point, nice, z)
+            st2["coverage"] = round(st2["n_accepted"] / denom, 4) if denom else 0.0
+            if nice != t and st2["n_accepted"] >= min_count and (st2["lower"] or 0.0) >= target:
+                st = st2
+            out.update({"tau": nice if st is st2 else t, **st})
+            return out
+    out["note"] = f"no threshold reached {target:.0%} agreement on >= {min_count} decisions"
+    if best is not None:
+        out["best"] = {"tau": best_t, **best}
+    return out
+
+
 def fit_point(records: list[dict[str, Any]], point: str, target: float = 0.95, min_count: int = 30,
               z: float = 1.645) -> dict[str, Any]:
     recs = labelled(records, point)
@@ -142,6 +174,16 @@ def fit_point(records: list[dict[str, Any]], point: str, target: float = 0.95, m
     if out.get("single_tool") and "single tool" not in out.get("note", ""):
         out["note"] = (out.get("note", "") + "; " if out.get("note") else "") + \
             f"{out['single_tool']} single-tool decisions left out"
+    if point == "tool_select":
+        # the global threshold must clear the target on every tool at once; per-tool thresholds let each tool
+        # earn its own (tools with fewer than min_count labelled decisions are left out: too few to fit)
+        by_tool: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for r in recs:
+            if r.get("choice") not in (None, NO_TOOL):
+                by_tool[str(r["choice"])].append(r)
+        out["per_tool"] = {tool: _fit_one_tool(rs, point, target, min_count, z, len(recs))
+                           for tool, rs in sorted(by_tool.items(), key=lambda kv: -len(kv[1]))
+                           if len(rs) >= min_count}
     logged = sorted({r.get("tau") for r in recs if r.get("tau") is not None})
     if len(logged) == 1:
         out["at_logged_tau"] = {"tau": logged[0], **_at(recs, point, float(logged[0]), z)}
@@ -195,12 +237,32 @@ def table(res: dict[str, Any]) -> str:
         tau = "-" if f["tau"] is None else f"{f['tau']:g}"
         rows.append(f"| {p} | {f['n_labelled']} | {tau} | {_pct(f.get('coverage'))} | {_pct(f.get('agreement'))} | "
                     f"{_pct(f.get('lower'))} | {f.get('note', '')} |")
+    pt = res["points"].get("tool_select", {}).get("per_tool")
+    if pt:
+        rows += ["", "| per-tool (tool_select) | labelled | fitted tau | acts on | agreement | lower bound | note |",
+                 "|---|---|---|---|---|---|---|"]
+        for tool, f in pt.items():
+            tau = "-" if f["tau"] is None else f"{f['tau']:g}"
+            note = f.get("note", "")
+            if f["tau"] is None and f.get("best"):
+                b = f["best"]
+                note += (f" (best: {_pct(b.get('agreement'))} agreement, lower bound {_pct(b.get('lower'))}, "
+                         f"at tau {b.get('tau'):g} on {b.get('n_accepted')} decisions)")
+            rows.append(f"| {tool} | {f['n_labelled']} | {tau} | {_pct(f.get('coverage'))} | "
+                        f"{_pct(f.get('agreement'))} | {_pct(f.get('lower'))} | {note} |")
     rows += ["", "| point:mode | calls | errors | acted | fires at logged tau | p50 latency s | cost $ |",
              "|---|---|---|---|---|---|---|"]
     for g, d in res["describe"].items():
         rows.append(f"| {g} | {d['calls']} | {d['errors']} | {d['acted']} | {_pct(d['would_fire_at_logged_tau'])} | "
                     f"{'-' if d['latency_p50_s'] is None else round(d['latency_p50_s'], 3)} | {d['cost_usd']} |")
     return "\n".join(rows)
+
+
+def _ykey(k: str) -> str:
+    """A YAML bare key if the tool name allows it, else single-quoted."""
+    if k and all(ch.isalnum() or ch in "_.-" for ch in k):
+        return k
+    return "'" + k.replace("'", "''") + "'"
 
 
 def snippet(res: dict[str, Any], source: str = "", era_note: str = "") -> str:
@@ -214,10 +276,23 @@ def snippet(res: dict[str, Any], source: str = "", era_note: str = "") -> str:
         head += f"\n# pooled over model names {', '.join(res['model_names'])} (use --model to fit one)"
     lines = [head, "decisions:"]
     for p, f in res["points"].items():
+        # only per-tool thresholds that differ from the effective global one: the rest change nothing
+        base = f["tau"] if f["tau"] is not None else TAU[p]
+        fitted = {t: v["tau"] for t, v in (f.get("per_tool") or {}).items()
+                  if v.get("tau") is not None and v["tau"] != base}
         if f["tau"] is not None:
-            lines.append(f"  {p}: {{tau: {f['tau']:g}}}    # {f['n_labelled']} labelled: acts on "
-                         f"{_pct(f['coverage'])}, {_pct(f['agreement'])} agree (lower bound {_pct(f['lower'])})")
+            tau, note = f["tau"], (f"{f['n_labelled']} labelled: acts on {_pct(f['coverage'])}, "
+                                   f"{_pct(f['agreement'])} agree (lower bound {_pct(f['lower'])})")
+        elif fitted:
+            # no single global threshold qualified: the per-tool thresholds act, the rest stay at the default
+            tau, note = base, (f"{f.get('note')}; per-tool thresholds only: the other tools keep the LLM "
+                               f"deciding (tau {base:g}, almost never)")
         else:
             keep = "mode: strong" if p == "stop" else "mode: off or shadow"
             lines.append(f"  # {p}: {f.get('note')}: keep the LLM deciding ({keep})")
+            continue
+        line = f"  {p}: {{tau: {tau:g}"
+        if fitted:
+            line += ", tool_tau: {" + ", ".join(f"{_ykey(t)}: {v:g}" for t, v in sorted(fitted.items())) + "}"
+        lines.append(line + "}    # " + note)
     return "\n".join(lines) + "\n"
