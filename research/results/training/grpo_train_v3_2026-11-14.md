@@ -734,3 +734,103 @@ v4 step15 仅比 v3 高 0.12pp（≈1 条，噪声内打平）；v4 final 低 0.
 ---
 
 **一句话带走：** train_v3 的数据量增加了 63%，但这次只训练了 33.5% 的 train，zero-std 又吃掉约一半 group，最终有效梯度与 v2 第二轮几乎相同；同时 dev 有 42% 落在 train 极少见的工具上。因此“效果不明显”主要是**训练预算、数据同质化和评估偏移**共同造成的，不是单纯的数据量问题。
+
+---
+
+## 19. v5：弱工具挖矿配额（非 shell）（2026-11-16）
+
+### 19.1 目标与假设
+
+v4 揭示了跷跷板：把 edit/webfetch/bash 的边界推对的同时吞掉 reply/read。v5 的唯一假设：**按 dev 缺口 + 池子可用量给弱工具定量挖矿（不按流量比例），压低 reply 配额、上调 read/edit，能打破跷跷板**。shell 家族配额维持 0（防 shell 偏置）。
+
+### 19.2 配额（`research/data/tool_caps_v5.json`）
+
+23 个规范名 key（工具名族经 `TOOL_ALIASES` 归一化，一条 cap 覆盖整族，见 commit `6f3439b`）：
+
+| 工具 | cap | 说明 |
+|---|---:|---|
+| read / edit | 100 / 100 | 跷跷板上调（v4 吞读） |
+| reply_without_tool | 60 | 压低（v4 已证过高会吞 read） |
+| compress / grep / write | 60 / 50 / 40 | 弱工具取满池子 |
+| done / not_done / execute / final_result | 15 / 16 / 10 / 20 | 长尾小 cap |
+| glob / webfetch / websearch / ask_user_question 等 | 3–10 | 长尾 |
+| **shell 族**（shell/bash/shell_run/shell_wait） | **0** | 整族排除 |
+
+全局参数：`--max-per-session 5`（per-(session,tool)）、`--min-margin 0.05`、`--max-total 600`、`--batch-size 16`；打分模型 = v3 final（生产模型）。
+
+### 19.3 挖矿与数据构建
+
+- **Track A**（`train_v4/train` 1717，v3 final 打分）→ queue **146 行 / 31 会话**，全部 error（high_conf_error 85 + shell_false_positive 55），零 shell 族行。队列分布：reply 36 / read 26 / edit 20 / compress 16 / write 14 / grep 12 / 其余个位。池内混淆证实弱工具错误主要是误选 shell：edit→shell 86、read→shell 87、compress→shell 57、write→shell 24。
+- **Track B**（生产 `decisions.jsonl`，唯一步 2706，exclude 已用集 2601 → 新行 105）→ queue **16 行 / 3 会话**：compress 5 / read 4 / edit 3 / 其余个位。
+- 合并 162 行 → `build_hard_weighted.py --clean-dir data/train_v4`（**注意**：base 从 train_v3_clean 改为 train_v4，因 v4 重切了 dev 842，用旧 clean 目录会泄漏新 dev）→ selected **135**（丢 26 截断 + 1 cap）、extras **234**、**final 1951 行**。
+- 独立泄漏复查（train_v5 1951 vs dev 族 1518）：**LEAK 0**。
+- 最终分布 vs base：edit 297→336、read 257→313、reply 181→245、compress 84→98、grep 52→72、write 39→63；shell 713 不变。
+- 产物：`checkpoints/mine_nonshell_v5_{train,prod}/`、`checkpoints/queue_v5_merged.jsonl`、`data/train_v5/{train_hard_weighted_v5.jsonl, train_hard_cases_v5.jsonl, MANIFEST_hard_weighted_v5.json}`。
+
+### 19.4 训练
+
+配方与 v3/v4 一致（从 v3 final 继续，1 epoch 跑满）：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 PYTHONPATH=src \
+TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1 nohup .venv/bin/python -m jevharness.training.grpo_trl \
+  --impl torch --model /data1/apps/huggingface/Qwen/Qwen3-4B \
+  --init checkpoints/grpo_train_v3_clean_hard_v3 \
+  --train data/train_v5/train_hard_weighted_v5.jsonl \
+  --dev data/train_v4/dev.jsonl \
+  --out checkpoints/grpo_train_v5 --rewards correct \
+  --num-generations 16 --batch-size 16 --grad-accum 16 \
+  --save-steps 5 --early-stop-patience 5 --early-stop-min-steps 60 \
+  --epochs 1 --lr 3e-6 --beta 0.05 --max-len 4608 \
+  --skip-zero-std --gradient-checkpointing --logging-steps 5 --seed 0
+```
+
+1 epoch **122 步跑满**（~2h20m），无早停、无崩溃。dev_acc 轨迹：step5 54.75 → step20 触底 53.68 → step75 起回升 → step80/100 54.75 → step120 54.87（全程最佳）。
+
+### 19.5 验收（dev 842，raw 口径，n-perm 0，batch 16，与 v3 基线同口径）
+
+| 模型 | acc | NLL | Brier | ECE | AUROC | mean_conf |
+|---|---:|---:|---:|---:|---:|---:|
+| v3 final（基线，生产） | 54.16% | **3.042** | 0.3777 | 0.3778 | 0.6663 | 0.9194 |
+| v5 step120 | 54.39% | 3.365 | 0.3916 | 0.3914 | 0.6569 | 0.9353 |
+| **v5 final（step122）** | 54.99% | 3.374 | 0.3920 | 0.3858 | 0.6431 | 0.9357 |
+
+整体 +0.83pp 在 n=842 的噪声内（1σ≈1.7pp），且 NLL/ECE/AUROC 全面变差（NLL 3.374 比 v4 final 3.342 还略差）——GRPO 每轮过度自信的老问题。
+
+逐工具（v3 → v5 step120 → v5 final，Δ = final−v3，pp）：
+
+| 工具 | n | v3 | s120 | final | Δ |
+|---|---:|---:|---:|---:|---:|
+| shell | 168 | 79.8 | 79.8 | 80.4 | +0.6 |
+| reply_without_tool | 165 | **65.5** | 62.4 | 63.0 | **−2.4** |
+| read | 134 | **47.0** | 43.3 | 44.0 | **−3.0** |
+| edit | 88 | 40.9 | 45.5 | **47.7** | +6.8 |
+| bash | 42 | 64.3 | 73.8 | 73.8 | +9.5 |
+| compress | 27 | 14.8 | 14.8 | 14.8 | 0 |
+| grep | 22 | 4.5 | 4.5 | 4.5 | 0 |
+| glob | 15 | 0.0 | 0.0 | 0.0 | 0 |
+| write | 18 | 33.3 | 27.8 | 27.8 | −5.6 |
+| webfetch | 23 | 30.4 | 39.1 | 39.1 | +8.7 |
+| done | 26 | 92.3 | 96.2 | 96.2 | +3.8 |
+| not_done | 14 | 7.1 | 0.0 | 0.0 | −7.1 |
+| execute | 13 | 23.1 | 38.5 | 30.8 | +7.7 |
+| shell_run / shell_wait | 29 / 7 | 69.0 / 14.3 | 69.0 / 28.6 | 69.0 / 42.9 | 0 / +28.6 |
+
+v5 final 混淆（gold → 前 3 错项）：shell→reply 17/edit 6/execute 3；reply→read 20/edit 19/shell 14；read→reply 34/edit 20/shell 9；edit→reply 17/read 11/shell 10；compress→shell 8/edit 7/reply 5；glob→reply 12/edit 3；write→**shell 10**；not_done→**done 14（全错）**。
+
+### 19.6 结论：v5 不部署
+
+生产维持 **v3 final + 校准**（global 3.0251733656628823 / choice:6-16 2.9999808412939433）。三条理由：
+
+1. **假设未成立**：弱工具配额挖矿修不动 reply/read——真正提升的是 edit +6.8 / webfetch +8.7 / bash +9.5（v4 已知的边界方向），跷跷板照旧：edit 上去的同时 read −3.0、reply −2.4。compress / grep / glob 配额取满池子也纹丝不动（池子太小，15–27 条 dev，加多少都进不了梯度）。
+2. 整体 +0.83pp 在噪声内，NLL 反劣 0.33。
+3. **not_done 14→0（14 条全变成 done）、write −5.6** 是明确退步。
+
+**价值**：train_v5 1951 行入库可作下轮 base；定量确认「纯靠弱工具加量修不了 reply/read，需要边界难例（read↔reply / edit↔read 互扰对）与增广」——这与 DECISION_DATA_V2 §11 轨道 B（扩 dev + 逐工具切片）的优先级一致。
+
+### 19.7 产物
+
+- 数据集：`data/train_v5/{train_hard_weighted_v5.jsonl (1951), train_hard_cases_v5.jsonl (135), MANIFEST_hard_weighted_v5.json}`
+- 适配器：`checkpoints/grpo_train_v5`（final + step-000005..000120）
+- 评测：`checkpoints/grpo_train_v5/per_tool_{step120,final}_dev842.json`；日志 `/tmp/grpo_train_v5.log`、`/tmp/mine_nonshell_v5_{train,prod}.log`、`/tmp/eval_v5_{both,step120,final}.log`
+- 相关：`research/data/tool_caps_v5.json`、`research/src/jevharness/training/mine_hard_cases.py`（TOOL_ALIASES）、`research/scripts/build_hard_weighted.py`
