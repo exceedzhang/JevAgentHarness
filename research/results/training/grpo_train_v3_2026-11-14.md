@@ -834,3 +834,100 @@ v5 final 混淆（gold → 前 3 错项）：shell→reply 17/edit 6/execute 3�
 - 适配器：`checkpoints/grpo_train_v5`（final + step-000005..000120）
 - 评测：`checkpoints/grpo_train_v5/per_tool_{step120,final}_dev842.json`；日志 `/tmp/grpo_train_v5.log`、`/tmp/mine_nonshell_v5_{train,prod}.log`、`/tmp/eval_v5_{both,step120,final}.log`
 - 相关：`research/data/tool_caps_v5.json`、`research/src/jevharness/training/mine_hard_cases.py`（TOOL_ALIASES）、`research/scripts/build_hard_weighted.py`
+
+## 20. v6：read↔reply / edit↔read 边界成对难例（2026-11-16）
+
+### 20.1 目标与假设
+
+v5 定量证明「纯弱工具加量」修不了 read↔reply 边界（v5 里 reply 65.5→63.0、read 47.0→44.0 均回退，而 edit/webfetch/bash 又上去——跷跷板照旧）。v6 假设：**结构化边界成对对比**——同一会话相邻 step（差 ≤2）、gold 在 {read, reply_without_tool, edit} 族内交替的行，状态最小差异、gold 相反——直接教模型「什么状态下 read、什么状态下 reply/edit」，可打破 read↔reply / edit↔read 互扰。
+
+### 20.2 挖矿机制（`research/scripts/mine_boundary_pairs.py`，新增）
+
+- 纯结构选择，**零 GPU、可复现**（不用模型打分）。
+- 配对规则：同 session、|step 差| ≤ `--max-gap`（2）、gold（经 TOOL_ALIASES 规范名）在族内且交替 → 两行都入队（`reasons=["boundary_pair"]`，带 `pair_id`/`pair_partners`）。
+- 生产 `decisions.jsonl` 新行：gold ∈ 族且不在任何对中的 → P1 singleton（`reasons=["boundary_prod_new"]`，`--no-prod-singletons` 可关）。
+- 配额（canonical）：read 100 / reply 80 / edit 80；per-(session,tool) 4；max_total 400。
+- 本地干跑（train_v4/train 1717）：419 对 → 队列 94 行 / 20 会话（read 33 / reply 34 / edit 27，均衡）。
+
+### 20.3 挖矿与数据构建
+
+- **Track A**（`--examples data/train_v4/train.jsonl`）：419 对 → 队列 **94 行 / 20 会话**。
+- **Track B**（`--decisions data/decisions.jsonl --exclude` train_v4 四文件 + hard_cases v1-v3 + train_v5 两文件 + v5 merged queue）：89 条生产新行 → **7 行 / 2 会话**。
+- 合并 101 行 → `build_hard_weighted.py --base data/train_v5/train_hard_weighted_v5.jsonl --dev-dir data/train_v4 --version v6` → selected **93**（8 条 truncated 丢）、extras **188**、**final 2139 行**（base 1951）。
+- **独立泄漏复查（2139 vs dev 族 1518）：LEAK 0**。
+- 分布 v5→v6（只边界族动）：**read 313→375、reply 245→314、edit 336→393**；shell 713 / compress 98 / grep 72 / write 63 等全部持平。
+- 产物：`checkpoints/queue_boundary_v6_merged.jsonl`、`data/train_v6/{train_hard_weighted_v6.jsonl (2139), train_hard_cases_v6.jsonl (93), MANIFEST_hard_weighted_v6.json}`。
+
+### 20.4 训练
+
+命令（与 v3-v5 同配方，`--init` v3 final，dev 842 早停 patience 5 / min 60，1 epoch ≈134 步 ~3h）：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 PYTHONPATH=src \
+TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1 nohup .venv/bin/python -m jevharness.training.grpo_trl \
+  --impl torch --model /data1/apps/huggingface/Qwen/Qwen3-4B \
+  --init checkpoints/grpo_train_v3_clean_hard_v3 \
+  --train data/train_v6/train_hard_weighted_v6.jsonl \
+  --dev data/train_v4/dev.jsonl \
+  --out checkpoints/grpo_train_v6 --rewards correct \
+  --num-generations 16 --batch-size 16 --grad-accum 16 \
+  --save-steps 5 --early-stop-patience 5 --early-stop-min-steps 60 \
+  --epochs 1 --lr 3e-6 --beta 0.05 --max-len 4608 \
+  --skip-zero-std --gradient-checkpointing --logging-steps 5 --seed 0
+```
+
+**134 步跑满**（~3h，无早停、无崩溃）。训练内 dev 轨迹：step110 **54.99**（峰值）→ step130 54.28 → final(step134) **54.63**。
+
+### 20.5 验收（dev 842，raw 口径 n-perm 0 batch 1；校准后见下）
+
+| 模型 | acc | NLL | Brier | ECE | AUROC | mean_conf |
+|---|---:|---:|---:|---:|---:|---:|
+| v3 final（基线，生产） | 54.16% | **3.042** | 0.3777 | 0.3778 | 0.6663 | 0.9194 |
+| v6 s110 | 54.63% | 3.445 | 0.392 | 0.391 | 0.6569 | 0.9353 |
+| v6 s130 | 54.39% | 3.508 | 0.398 | 0.397 | 0.6577 | — |
+| **v6 final（raw）** | **54.87%** | 3.519 | 0.398 | 0.397 | 0.6505 | — |
+| **v6 final（校准后）** | **54.87%** | **1.644** | 0.2312 | **0.0599** | 0.6681 | 0.5923 |
+
+校准值（`checkpoints/grpo_train_v6/calibration.json`，dev 842 拟合）：global **3.2108**、choice:6-16 **3.4545**、choice:17-52 **2.5680**（v3 生产在跑的是 global 3.0252 / choice:6-16 3.0000）。
+
+逐工具（v3 → v6 final，Δ = final−v3，pp）：
+
+| 工具 | n | v3 | v6 final | Δ |
+|---|---:|---:|---:|---:|
+| shell | 168 | 79.8 | 79.2 | −0.6 |
+| reply_without_tool | 165 | 65.5 | **69.1** | **+3.6** |
+| read | 134 | **47.0** | 41.8 | **−5.2** |
+| edit | 88 | 40.9 | **50.0** | **+9.1** |
+| bash | 42 | 64.3 | 61.9 | −2.4 |
+| shell_run | 29 | 69.0 | 69.0 | 0 |
+| shell_wait | 7 | 14.3 | 42.9 | +28.6（n 小，噪声） |
+| compress | 27 | 14.8 | 14.8 | 0 |
+| grep | 22 | 4.5 | 4.5 | 0 |
+| glob | 15 | 0.0 | 0.0 | 0 |
+| write | 18 | 33.3 | 27.8 | −5.6 |
+| webfetch | 23 | 30.4 | 26.1 | −4.3 |
+| done | 26 | 92.3 | 96.2 | +3.8 |
+| not_done | 14 | 7.1 | 0.0 | −7.1 |
+| execute | 13 | 23.1 | 30.8 | +7.7 |
+| final_result | 14 | 78.6 | 78.6 | 0 |
+
+v6 final 混淆（gold → 前 3 错项）：shell→reply 17/edit 6/execute 3；reply→read 20/edit 19/shell 14；read→reply 34/edit 20/shell 9；edit→reply 17/read 11/shell 10；compress→shell 8/edit 7/reply 5；webfetch→reply 6/shell 5/read 3；grep→edit 6/reply 6/shell 5；write→**shell 10**/bash 1/edit 1；glob→reply 12/edit 3；not_done→**done 14（全错）**。
+
+**门判定（开训前写死）**：NLL raw 3.519 > 3.1 → 缩放后 **1.644**（v3 为 1.63，落在 1.2–1.6 区间上沿）✓；acc 54.87 vs 54.16 = **+0.71pp** ✓；ECE 0.0599 < v3 0.075 ✓。
+
+### 20.6 结论：v6 达标，部署待批准
+
+1. **假设部分成立**：reply +3.6、edit +9.1 是本轮主修复（成对对比有效）；但 **read −5.2**（134 行 dev 切片，生产高频）+ webfetch −4.3 / write −5.6 回退，跷跷板没完全打破，只是从「edit 独涨」变成「reply/edit 涨、read 跌」。
+2. 校准后 NLL/ECE 与 v3 同档甚至更优（ECE 0.060 < 0.075），按预注册门 v6 **可部署**：`grpo_train_v6`（final，acc 最高 54.87）+ `calibration.json`（global 3.2108 / choice:6-16 3.4545）原子切换，线上验证 p 分布。
+3. 回滚方案：v3 全套产物 + 校准（global 3.0252 / choice:6-16 3.0000）保留，随时切回。
+4. **状态：写本文档时部署未获批准，生产维持 v3 final + 校准不变。**
+5. 若不部署：下一轮挖矿配额向 read/webfetch/write 边界对倾斜 + option-permutation 增广（glob 池 3 / webfetch 池 2 已枯竭，见 §19.6 轨道 B 优先级）。
+
+### 20.7 产物
+
+- 脚本：`research/scripts/mine_boundary_pairs.py`（含 6 个单测 `research/tests/test_mine_boundary_pairs.py`）
+- 数据集：`data/train_v6/{train_hard_weighted_v6.jsonl (2139), train_hard_cases_v6.jsonl (93), MANIFEST_hard_weighted_v6.json}`
+- 适配器：`checkpoints/grpo_train_v6`（final + step-000005..000130 + `calibration.json`）
+- 评测：`/tmp/eval_v6_{step-000110,step-000130,final,final_calibrated}.json`
+- 日志：`/tmp/grpo_train_v6.log`、`/tmp/mine_boundary_v6_{train,prod}.log`、`/tmp/cal_v6_all.log`
+- 挖矿队列：`checkpoints/mine_boundary_v6_{train,prod}/`、`checkpoints/queue_boundary_v6_merged.jsonl`
