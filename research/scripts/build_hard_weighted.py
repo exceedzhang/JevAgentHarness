@@ -110,6 +110,12 @@ def priority(row: dict[str, Any]) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--clean-dir", type=Path, default=Path("data/train_v3_clean"))
+    ap.add_argument("--base", type=Path, default=None,
+                    help="explicit base train file (default: <clean-dir>/train.jsonl); when set, the "
+                         "'already in base' weight rule compares against this file's own keys")
+    ap.add_argument("--dev-dir", type=Path, default=None,
+                    help="directory holding dev.jsonl/dev_alt.jsonl/dev_shell.jsonl for the leak check "
+                         "(default: --clean-dir)")
     ap.add_argument("--queue", type=Path, default=Path("checkpoints/mine_hard_cases_p1_all/queue.jsonl"))
     ap.add_argument("--out", type=Path, default=Path("data/train_v3_clean/train_hard_weighted_v1.jsonl"))
     ap.add_argument("--selected-out", type=Path, default=Path("data/train_v3_clean/train_hard_cases_v1.jsonl"))
@@ -132,15 +138,20 @@ def main() -> None:
         weights.update({str(k): int(v) for k, v in
                         json.loads(p.read_text() if p.exists() else args.priority_weights).items()})
 
-    clean = read_jsonl(args.clean_dir / "train.jsonl")
+    base_path = args.base if args.base is not None else args.clean_dir / "train.jsonl"
+    dev_dir = args.dev_dir if args.dev_dir is not None else args.clean_dir
+    clean = read_jsonl(base_path)
     queue = read_jsonl(args.queue)
     split_rows = {
-        name: read_jsonl(args.clean_dir / f"{name}.jsonl")
+        name: read_jsonl(dev_dir / f"{name}.jsonl")
         for name in ("train", "dev", "dev_alt", "dev_shell")
     }
     split_keys = {name: {key(r) for r in rows} for name, rows in split_rows.items()}
     dev_keys = set().union(split_keys["dev"], split_keys["dev_alt"], split_keys["dev_shell"])
-    train_keys = split_keys["train"]
+    # "Already in base" decides the weight-1 vs full-weight rule.  When an explicit --base is
+    # given (a previously augmented file) compare against the base file's own keys, not the raw
+    # split, so augmented rows are still recognised as base rows.
+    train_keys = {key(r) for r in clean} if args.base is not None else split_keys["train"]
 
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -195,7 +206,8 @@ def main() -> None:
 
     manifest = {
         "version": f"train_hard_weighted_{args.version}",
-        "clean_train": str(args.clean_dir / "train.jsonl"),
+        "clean_train": str(base_path),
+        "dev_dir": str(dev_dir),
         "queue": str(args.queue),
         "out": str(args.out),
         "selected_out": str(args.selected_out),
