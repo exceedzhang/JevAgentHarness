@@ -915,12 +915,12 @@ v6 final 混淆（gold → 前 3 错项）：shell→reply 17/edit 6/execute 3�
 
 **门判定（开训前写死）**：NLL raw 3.519 > 3.1 → 缩放后 **1.644**（v3 为 1.63，落在 1.2–1.6 区间上沿）✓；acc 54.87 vs 54.16 = **+0.71pp** ✓；ECE 0.0599 < v3 0.075 ✓。
 
-### 20.6 结论：v6 达标，部署待批准
+### 20.6 结论：v6 达标；用户裁决维持 v3，不部署
 
 1. **假设部分成立**：reply +3.6、edit +9.1 是本轮主修复（成对对比有效）；但 **read −5.2**（134 行 dev 切片，生产高频）+ webfetch −4.3 / write −5.6 回退，跷跷板没完全打破，只是从「edit 独涨」变成「reply/edit 涨、read 跌」。
 2. 校准后 NLL/ECE 与 v3 同档甚至更优（ECE 0.060 < 0.075），按预注册门 v6 **可部署**：`grpo_train_v6`（final，acc 最高 54.87）+ `calibration.json`（global 3.2108 / choice:6-16 3.4545）原子切换，线上验证 p 分布。
 3. 回滚方案：v3 全套产物 + 校准（global 3.0252 / choice:6-16 3.0000）保留，随时切回。
-4. **状态：写本文档时部署未获批准，生产维持 v3 final + 校准不变。**
+4. **状态（11-16 用户裁决）：维持 v3，v6 不部署**；`checkpoints/grpo_train_v6`（final）+ `calibration.json` 入库待命，随时可切换上线或回滚。
 5. 若不部署：下一轮挖矿配额向 read/webfetch/write 边界对倾斜 + option-permutation 增广（glob 池 3 / webfetch 池 2 已枯竭，见 §19.6 轨道 B 优先级）。
 
 ### 20.7 产物
