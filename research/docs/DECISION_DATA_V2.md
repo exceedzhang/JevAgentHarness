@@ -240,3 +240,12 @@ tool_select 标签采集 ~300-500 条/天（shadow）；dev 264 条。
 - **v8 部署（客户端 JAH 架构）**：生产 JAH 决策跑在本地 litellm-jah + ssh-tunnel（非服务器纯 litellm 代理）。服务端 vLLM adapter = v8（served `AgentDecision-4B-1117`，md5 与 `grpo_train_v8` 一致）；本地 litellm-jah 镜像重建为 v8 校准（`litellm-jah:v8`，`jah-config.yaml` global 3.877 / choice:6-16 4.203 / 17-52 3.069，commit `fe495e5`）；`docker compose up -d --force-recreate` 生效。p_hard 初步：切点前最近 150 条 routing 中位 0.541、>0.85 占 7.3%（更早 bulk 0.619 / 20.8%）→ 更平；但尚无干净 post-切点样本，待积累后复核。
 - 纪律保持：`--exclude` 覆盖全部已用集；去重键 (session, step, sha256(state)[:16])；v7/v8 两轮独立 LEAK 复查均为 0。v8 selected 113 难例里 top-2 session 占 63%（集中度偏高，需观察是否过拟合这两会话）。
 - 回滚：v3（global 3.025 / choice:6-16 3.000）、v7（global 3.381 / choice:6-16 3.664）adapter+calibration 均保留，可随时切回。
+
+### 13.1 v8 上线后 fit 报告 + routing 触发率（11-17，客户端 decisions.jsonl）
+
+数据：本地 `litellm-jah` 容器 `~/.jah/litellm-logs/decisions.jsonl`（12678 行，Nov 1→17 01:48 UTC）。`jah fit`（`jevagentharness.cli fit`）在 `--target 0.95 --min-count 30 --z 1.645` 下拟合 `tool_select`/`stop` 阈值；`--since 2026-11-17 01:18` 隔离 v8 时代。
+
+- **全量 pooled（Nov 1–17，主体 v3/preview 时代）**：tool_select 4128 标签 / stop 373，**均无阈值达 95% 一致**（≥30 条）。逐工具最佳一致率（/ 下界 / tau / n）：shell 90.6/78.7/0.8225/32、read 87.5/68.4/0.6016/16、compress 79.0/60.5/0.8365/19、bash 90.0/65.2/0.5104/10、edit 43.8/30.4/0.3854/32、write 36.4/17.5/0.7627/11、webfetch **16.3**/9.4/0.2107/49（最差）。routing:cascade 7631 calls，**fires at logged tau 28.2%**。→ tool_select/stop 均保持 LLM 决策（shadow/strong），只收集标签。
+- **v8 时代（`--since 2026-11-17 01:18`，~30min，269 tool_select 标签）**：routing **fires at logged tau 10.7%**（vs pooled 28.2%）；tool_select 269 标签**仍无 95% 阈值**（shell 最佳 70.3% / 37 条，read 100% 仅 1 条）；stop 42 无阈值。配置片段同 pooled：tool_select → off/shadow、stop → strong。
+- **解读**：v8 校准（global T=3.877）压平 p_hard → routing 触发从 28.2% 降到 **10.7%**（~89% 步走 fast、省 ~2/3 strong 调用，方向对/省钱）；但存在**路由不足**风险（若 T 压太狠，本应走 strong 的难步被压到 fast，需盯 10.7% 那批 strong 步 vs fast 步的下游成功率）。tool_select 在 v8 时代一致率（shell 70.3%）仍 <95% 且样本仅 30min，**与 dev 逐工具（webfetch/write/edit 弱、shell/read 相对好）交叉一致** → tool_select 维持 shadow。
+- **caveat + 下一步**：v8 时代样本仅 ~30min（269 tool_select / 263 routing），属**方向性结论**；建议每天用 `--since 2026-11-17T01:18Z` 重跑 fit，盯（1）routing 10.7% 是否路由不足（若难例被 fast 漏 → 单独调 routing tau 或 T）、（2）tool_select 逐工具一致率是否收敛到某工具可单独提 act（shell 最有希望）。
