@@ -931,3 +931,127 @@ v6 final 混淆（gold → 前 3 错项）：shell→reply 17/edit 6/execute 3�
 - 评测：`/tmp/eval_v6_{step-000110,step-000130,final,final_calibrated}.json`
 - 日志：`/tmp/grpo_train_v6.log`、`/tmp/mine_boundary_v6_{train,prod}.log`、`/tmp/cal_v6_all.log`
 - 挖矿队列：`checkpoints/mine_boundary_v6_{train,prod}/`、`checkpoints/queue_boundary_v6_merged.jsonl`
+
+## 21. v7：read / write / webfetch 边界成对 + option-permutation 增广（2026-11-16）
+
+### 21.1 目标与假设
+
+v5 证明「纯加量」修不了弱工具边界，v6 证明「结构化成对对比」对 reply/edit 有效（+3.6/+9.1）但 read 又回退（−5.2）。v7 假设：把成对机制**换靶心**到 v5 证明有效、v6 又回退的 **read / write / webfetch** 族，并叠加 **option-permutation 增广**（`grpo_trl --n-permutations 2`，每例选项顺序 shuffle 2 次）提升对选项顺序的鲁棒性。init 仍为 v3 final。
+
+### 21.2 配额与挖矿（`mine_boundary_pairs.py --family read,write,webfetch`）
+
+- 配额（canonical 上限，受池子约束）：read 100 / write 40 / webfetch 20；`--max-gap 2`；`--max-per-session-tool 8`（放宽以向靶心倾斜）；`--max-total 400`。
+- 池子实况（train_v4/train 1717）：read 257 / write 39 / **webfetch 仅 2（枯竭，无对可挖）**；`read↔write` 恰好 **53 对 / 83 成员行**（本轮主体）。
+- Track A：53 对 → per-session-tool 8 → **31 行（read 16 / write 15）**。Track B（生产新鲜行）：82 条全非族 → **0 行**（read/write/webfetch 新鲜行已耗尽）。
+
+### 21.3 数据构建（base = v6 2139）
+
+31 行队列 → **selected 25**（丢 6 truncated）+ 50 加权 extras → **train_v7 = 2189 行**。**独立 LEAK 复查：0**。分布 v6→v7：**read 375→401 (+26)、write 63→87 (+24)**，webfetch 4 / shell 713 / edit 393 / reply 314 / compress 98 / grep 72 全持平。
+
+### 21.4 训练
+
+与 v3–v6 同配方 + `--n-permutations 2`（日志确认 **4378 rows = 2189×2**）。`--init checkpoints/grpo_train_v3_clean_hard_v3`，dev 842 早停（patience 5 / min 60）。**274 步跑满（1 epoch，无早停）**，final in-train dev_acc **0.5594**（NLL 3.754），in-train 峰 step245=0.5606。
+
+### 21.5 验收（dev 842，n-perm 0 batch 1）
+
+| 模型 | acc | NLL | Brier | ECE | AUROC |
+|---|---:|---:|---:|---:|---:|
+| v3 final（基线，当时生产） | 54.16% | 3.042 | 0.378 | 0.378 | 0.666 |
+| v6 final（校准后） | 54.87% | 1.644 | 0.231 | 0.060 | 0.668 |
+| v7 final（raw） | 55.94% | 3.743 | 0.396 | 0.397 | — |
+| **v7 final（校准后）** | **55.94%** | **1.642** | 0.226 | **0.0486** | **0.682** |
+
+校准值（`checkpoints/grpo_train_v7/calibration.json`）：global **3.3813**、choice:6-16 **3.6644**、choice:17-52 **2.6715**。
+
+逐工具（v3 → v7 校准后，Δ pp）：
+
+| 工具 | n | v3 | v7 | Δ |
+|---|---:|---:|---:|---:|
+| **write** | 18 | 33.3 | **44.4** | **+11.1**（靶心 ✓）|
+| **webfetch** | 23 | 30.4 | **34.8** | **+4.3**（靶心 ✓）|
+| **read** | 134 | 47.0 | **50.0** | **+3.0**（靶心 ✓）|
+| edit | 88 | 40.9 | 53.4 | +12.5 |
+| bash | 42 | 64.3 | 73.8 | +9.5 |
+| execute | 13 | 23.1 | 46.2 | +23.1 |
+| **reply** | 165 | 65.5 | 58.8 | **−6.7** ⚠️ |
+| shell | 168 | 79.8 | 78.6 | −1.2 |
+| done / not_done / compress / grep / glob | — | 92.3 / 7.1 / 14.8 / 4.5 / 0 | 持平 | — |
+
+**v7 是历轮综合最强**：acc 55.94（+1.78 vs v3、+1.07 vs v6）、ECE 0.0486（历轮最低）、AUROC 0.682（历轮最高）。靶心三项（read/write/webfetch）全部命中、edit/bash/execute 顺带大涨；**代价是 reply −6.7**（跷跷板再现，方向从 v6 的 read 换到了 reply）。
+
+### 21.6 结论：v7 达标；作为 v8 的 init，未单独部署
+
+1. 假设成立：成对机制 + option-permutation 对 read/write/webfetch 靶心有效（+11.1/+4.3/+3.0）。
+2. 但 reply −6.7 说明跷跷板未根治——v7 是「靶心命中 + 顺带修 edit/bash + 牺牲 reply」的混合体。
+3. 状态：v7 作为下一轮（v8）的 init，**未单独部署**（当时生产维持 v3）。
+
+### 21.7 产物
+
+- 数据集：`data/train_v7/{train_hard_weighted_v7.jsonl (2189), train_hard_cases_v7.jsonl (25), MANIFEST_hard_weighted_v7.json}`
+- 适配器：`checkpoints/grpo_train_v7`（final + step-000005..000275 + `calibration.json`）
+- 评测：`/tmp/eval_v7_{final,final_calibrated}.json`；日志 `/tmp/grpo_train_v7.log`、`/tmp/v7_watch_eval.log`、`/tmp/v7_pipeline.log`
+- 队列：`checkpoints/queue_boundary_v7_merged.jsonl`（31 行）
+
+## 22. v8：reply↔read 平衡轮（init = v7，2026-11-17）
+
+### 22.1 目标与假设
+
+v7 靶心命中但 reply −6.7（跷跷板再现）。v8 假设：把成对机制**换到 reply↔read 族**（train_v4/train 里 reply↔read 恰好 161 对），把**两端同时**抬到 v3 之上（v7 只抬了 read、砸了 reply），叠加 option-permutation。**关键改动：init = v7 final**（在最强模型上继续，而非回 v3）。
+
+### 22.2 配额与挖矿（`--family reply_without_tool,read`）
+
+- 配额：reply 140 / read 140；`--max-gap 2`；`--max-per-session-tool 20`。
+- 池子：reply↔read **161 对 / 253 成员行**（read 139 / reply 114，18 session）。
+- Track A：**126 行（read 64 / reply 62）**。Track B：82 条生产新鲜全非族 → **0 行**（reply/read 已枯竭）。
+
+### 22.3 数据构建（base = v7 2189）
+
+126 行队列 → **selected 113**（read 55 / reply 58）+ 226 加权 extras → **train_v8 = 2415 行**（13 truncated 丢）。**LEAK 0**。分布 v7→v8：**read 401→511 (+110)、reply 314→430 (+116)**，其余全持平。**风险**：top-2 session（ses_e54598… 36 行 / ses_e3fa… 35 行）占 selected 113 里 71 行（63%），session 集中度偏高。
+
+### 22.4 训练
+
+同配方 + `--n-permutations 2`（**4830 rows = 2415×2**）。**`--init checkpoints/grpo_train_v7`**（v7 final，关键改动）。dev 842 早停。**302 步跑满（1 epoch，无早停，~6.5h）**，in-train dev 峰 **0.5713（step 230，历轮最高）**。
+
+### 22.5 验收（dev 842，n-perm 0 batch 1）
+
+| 模型 | acc | NLL | Brier | ECE | AUROC |
+|---|---:|---:|---:|---:|---:|
+| v3 final（基线，原生产） | 54.16% | 3.042 | 0.378 | 0.378 | 0.666 |
+| v7 final（校准后） | 55.94% | 1.642 | 0.226 | 0.0486 | 0.682 |
+| v8 step-230（raw，in-train 峰） | 56.89% | 4.265 | — | — | — |
+| **v8 final（校准后）** | **56.41%** | **1.659** | 0.227 | 0.0578 | 0.679 |
+
+校准值（`checkpoints/grpo_train_v8/calibration.json`）：global **3.8770**、choice:6-16 **4.2028**、choice:17-52 **3.0691**。global 温度逐轮抬升（v3 3.03 → v6 3.21 → v7 3.38 → v8 3.88），因 raw 模型越来越过度自信；校准后 NLL 均落 1.63–1.66 健康区。
+
+逐工具（v3 → v7 校准 → v8 校准，acc%）：
+
+| 工具 | n | v3 | v7 | v8 | v8 vs v3 |
+|---|---:|---:|---:|---:|---:|
+| **reply** | 165 | 65.5 | 58.8 | **69.1** | **+3.6（超 v3）** ✓ |
+| **read** | 134 | 47.0 | 50.0 | **48.5** | +1.5（≥v3，<v7）✓ |
+| edit | 88 | 40.9 | 53.4 | 50.0 | +9.1 |
+| bash | 42 | 64.3 | 73.8 | 69.0 | +4.7 |
+| final_result | 14 | 78.6 | 78.6 | 100.0 | +21.4 |
+| execute | 13 | 23.1 | 46.2 | 30.8 | +7.7 |
+| write | 18 | 33.3 | 44.4 | 33.3 | 0（−11.1 vs v7）|
+| webfetch | 23 | 30.4 | 34.8 | 30.4 | 0（−4.3 vs v7）|
+| shell | 168 | 79.8 | 78.6 | 76.8 | −3.0 |
+| done / not_done / compress / grep / glob / shell_run | — | 92.3 / 7.1 / 14.8 / 4.5 / 0 / 69.0 | 持平 | 持平 | — |
+
+**门判定（开训前写死）**：reply 回升 ≥+3 vs v7 → 58.8→**69.1（+10.3，且超 v3 65.5）** ✓；read ≥ v3 47.0 → **48.5** ✓（未达 v7 50.0 偏好）；整体 acc ≥ v7 → **56.41** ✓；校准后 NLL/ECE → 1.659 / 0.0578（与 v7 同档、略差 0.009）✓。
+
+### 22.6 结论：v8 达标，已部署（客户端 JAH 决策）
+
+1. **假设成立**：reply↔read 两端**同时**抬到 v3 之上（reply 69.1 > 65.5、read 48.5 > 47.0）——v7 没做到的，v8 做到了。整体 acc **56.41 历轮最高**（+2.25 vs v3、+0.47 vs v7）。
+2. 代价：write −11.1 / webfetch −4.3 / execute −15.4 vs v7（非本轮靶心）、shell −3.0 vs v3——跷跷板把「牺牲」从 reply 转到了 write/webfetch。
+3. **部署（v8 = 现生产）**：服务端 vLLM adapter 切 v8（served 目录 `AgentDecision-4B-1117`，md5 与 `grpo_train_v8` 一致）+ 本地 litellm-jah 镜像重建为 v8 校准（global 3.877 / choice:6-16 4.203 / 17-52 3.069）+ 客户端侧 `docker compose up -d --force-recreate` 生效。**客户端 JAH 决策 + 校准 = v8，全链路 v8**（架构：生产 JAH 决策跑在本地 litellm-jah + ssh-tunnel，服务器 vllm-openai-1 供 v8 adapter、纯代理不带校准）。
+4. **p_hard 验证（初步）**：decisions.jsonl 切点前最近 150 条 routing 行 p_hard 中位 **0.541 / >0.85 占 7.3%**（更早 bulk 0.619 / 20.8%）→ 明显更平、更少触发 strong；但数据止于切点（~02:00 UTC），**尚无干净 post-切点 routing 样本**（v8 校准 T=3.877 尚未隔离验证），待积累 post-切点流量后复核。
+5. 回滚方案：v3 / v7 全套 adapter + calibration 保留（v3 global 3.025 / choice:6-16 3.000；v7 global 3.381 / choice:6-16 3.664），随时可切回。
+
+### 22.7 产物
+
+- 数据集：`data/train_v8/{train_hard_weighted_v8.jsonl (2415), train_hard_cases_v8.jsonl (113), MANIFEST_hard_weighted_v8.json}`
+- 适配器：`checkpoints/grpo_train_v8`（final + step-000005..000300 + `calibration.json`；部署版 served 目录 `AgentDecision-4B-1117`）
+- 评测：`/tmp/eval_v8_{final,final_calibrated,step-000230,step-000285}.json`；日志 `/tmp/grpo_train_v8.log`、`/tmp/v8_watch_eval.log`
+- 配置：`litellm_jah/docker/jah-config.yaml`（v8 校准，commit `fe495e5`）；本地镜像 `litellm-jah:latest` = `litellm-jah:v8`（a6bcfc0e）
+- 队列：`checkpoints/queue_boundary_v8_merged.jsonl`（126 行）

@@ -232,3 +232,11 @@ tool_select 标签采集 ~300-500 条/天（shadow）；dev 264 条。
 - **v6（read↔reply / edit↔read 边界成对，train_v6 2139 行）**：校准后 dev 842 = acc **54.87** / NLL **1.644** / ECE **0.060**（v3 基线 54.16 / 1.63 / 0.075）；逐工具 reply +3.6、edit +9.1，read −5.2、webfetch −4.3、write −5.6。预注册门达标 → 用户裁决（11-16）：**维持 v3，v6 不部署**；v6 adapter + calibration 入库待命，随时可切换/回滚。
 - 纪律保持：`--exclude` 覆盖全部已用集（train_v4 四文件 + hard_cases v1-v3 + train_v5 两文件 + 历次 merged queue）；去重键 (session, step, sha256(state)[:16])；v5/v6 两轮独立 LEAK 复查均为 0。
 - 下一步：部署决定后——若上 v6，盯 read 切片线上 p 分布（可回滚 v3）；若不上，配额向 read/webfetch/write 边界对倾斜 + option-permutation 增广（glob/webfetch 池已枯竭）。
+
+### 13. v7/v8 轮进展与 v8 部署（11-16 / 11-17）
+
+- **v7（read/write/webfetch 边界成对 + option-permutation n=2，train_v7 2189 行，init=v3 final）**：dev 842 校准后 acc **55.94** / NLL 1.642 / ECE **0.0486** / AUROC 0.682（历轮最强）。靶心三项全部命中：read 47.0→50.0(+3.0)、write 33.3→44.4(+11.1)、webfetch 30.4→34.8(+4.3)；但 reply 65.5→58.8（−6.7）。作为 v8 init，未单独部署。详见 grpo 文档 §21。
+- **v8（reply↔read 平衡轮，train_v8 2415 行，init=**v7 final**）**：dev 842 校准后 acc **56.41**（历轮最高，+2.25 vs v3、+0.47 vs v7）/ NLL 1.659 / ECE 0.0578。reply↔read **两端同时**抬到 v3 之上：reply 58.8→**69.1**（+10.3，超 v3 65.5）、read 50.0→48.5（≥v3 47.0）。代价：write −11.1 / webfetch −4.3 / execute −15.4 vs v7。预注册门四条全达标 → **已部署**。详见 grpo 文档 §22。
+- **v8 部署（客户端 JAH 架构）**：生产 JAH 决策跑在本地 litellm-jah + ssh-tunnel（非服务器纯 litellm 代理）。服务端 vLLM adapter = v8（served `AgentDecision-4B-1117`，md5 与 `grpo_train_v8` 一致）；本地 litellm-jah 镜像重建为 v8 校准（`litellm-jah:v8`，`jah-config.yaml` global 3.877 / choice:6-16 4.203 / 17-52 3.069，commit `fe495e5`）；`docker compose up -d --force-recreate` 生效。p_hard 初步：切点前最近 150 条 routing 中位 0.541、>0.85 占 7.3%（更早 bulk 0.619 / 20.8%）→ 更平；但尚无干净 post-切点样本，待积累后复核。
+- 纪律保持：`--exclude` 覆盖全部已用集；去重键 (session, step, sha256(state)[:16])；v7/v8 两轮独立 LEAK 复查均为 0。v8 selected 113 难例里 top-2 session 占 63%（集中度偏高，需观察是否过拟合这两会话）。
+- 回滚：v3（global 3.025 / choice:6-16 3.000）、v7（global 3.381 / choice:6-16 3.664）adapter+calibration 均保留，可随时切回。
