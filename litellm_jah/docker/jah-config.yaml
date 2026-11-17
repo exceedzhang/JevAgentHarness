@@ -21,16 +21,16 @@ decision:
   # With this block taus are read in the calibrated space; taus fitted earlier on 4B/raw rows (jah fit
   # 11-04/11-05) are NOT comparable - decisions rows carry model x calibrated so the fit eras cut apart.
   # The quoted keys are not a YAML 1.1 `off`-style necessity; quotes are used for visibility.
-  # 11-15 full re-fit on the v3 GRPO model (train_v3_clean dev, 264 rows, raw NLL 3.21): global 3.025 +
-  # choice:6-16 3.000 flatten its overconfident output (mean_conf 0.93->0.58, ECE 0.42->0.075, NLL 3.21->1.63;
-  # argmax unchanged). This replaces the old model's temps (choice:3-5 0.968, noul:2 0.423) outright.
-  # NOTE (approved 11-15): global 0.772->3.025 flattens routing/stop p(hard) hard - fires@tau0.85 drops from
-  # ~38% to ~2-3%, so nearly all steps go fast. The calibration matches the v3 adapter
-  # (research/checkpoints/grpo_train_v3_clean_hard_v3), not the previously served model.
+  # 11-17 re-fit on the v8 GRPO model (base train_v7 -> reply<->read balance, dev 842, raw NLL 4.38): global 3.877 +
+  # choice:6-16 4.203 + choice:17-52 3.069 flatten its overconfident output (post-cal NLL 1.66, ECE 0.058,
+  # argmax unchanged). Replaces the v3 temps (global 3.025, choice:6-16 3.000) outright. The calibration matches
+  # the v8 adapter (research/checkpoints/grpo_train_v8), NOT the v3 adapter previously served - deploy atomically:
+  # switch the served adapter to grpo_train_v8 AND these temps together, then verify the online p distribution.
   calibration:
-    global: 3.0251733656628823
+    global: 3.8770035753998733
     buckets:
-      "choice:6-16": 2.9999808412939433
+      "choice:6-16": 4.202820324324984
+      "choice:17-52": 3.0691160902112
 # 0.75 was the preview-model fit. On AgentDecision-4B calibrated (era from 2026-11-05 17:01) the p_hard
 # distribution shifted right (median 0.63 -> 0.73): 0.75 fired 47% vs preview's 35%. 0.80 restores the
 # preview-era acting strength (fires ~37%, ~-9% daily cost); 0.85 -> 26% fires / -19% cost if we accept
