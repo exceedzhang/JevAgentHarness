@@ -254,3 +254,26 @@ tool_select 标签采集 ~300-500 条/天（shadow）；dev 264 条。
 - **v9（read/edit/write 边界成对，train_v9 3146 行，init=v8 final）**：校准后 acc **56.89**（历轮最高，+0.48 vs v8）/ NLL 1.648 / **ECE 0.0425**（历轮最低）/ AUROC 0.6827。三靶心全升：edit 50.0→64.8（**+14.8 最大**）、read 48.5→50.7（+2.2）、write 33.3→38.9（+5.6）；但 **reply 69.1→61.8（−7.3，违反预注册门 4 的 reply>−3pp）**、final_result 100.0→78.6（−21.4，n=14）。校准 global 4.2206 / choice:6-16 4.5747 / 17-52 3.3336。详见 grpo 文档 §23。
 - **裁决（11-17 用户）：维持 v8，v9 不部署**（3/4 门通过、门 4 reply 回退违反；v9 整体最优但砸 reply 高流量工具）。v9 adapter + calibration 入库待命，可切换/回滚。
 - **深层 + 下一步**：v8/v9 都是「整体最佳但各砸一个高流量工具」（v8 砸 write/webfetch、v9 砸 reply）——**边界挖矿的跷跷板在池子挖 ~80% 后边际递减**（与 90%/86% 天花板分析一致，继续挖数据 ROI 低）。建议停止纯边界挖矿，转（a）生产积累真实 glob/webfetch 流量、（b）换机制（工具 schema 感知 prompt / 两段式决策）。
+
+### 13.3 shell 族混淆分析（11-17，客户端 decisions.jsonl，tool_select）
+
+数据：本地 `litellm-jah` 容器 `decisions.jsonl`（13214 行，Nov 1→17 15:43 UTC）的 tool_select 行（全量 4480 标签 / 今天 Nov17 522 标签）。`choice`=决策模型 top-1 预测、`label`=agent 实际用的工具、agree=两者一致。注：这是 tool_select（shadow 收集）的 top-1 口径，与 dev 逐工具 acc（不同决策点/样本）不直接比大小。
+
+**核心结论：shell 和 bash 不互相混淆（双向交叉 = 0）**。混淆矩阵（gold label 行 × 模型 choice 列，全量）：
+
+| gold ↓ \ choice → | shell | bash | shell_run | shell_wait | other | 总 |
+|---|---:|---:|---:|---:|---:|---:|
+| shell (1556) | **473** | 0 | 0 | 0 | 1083 | 1556 |
+| bash (246) | 0 | **22** | 0 | 0 | 224 | 246 |
+| shell_run (30) | 0 | 0 | 18 | 0 | 12 | 30 |
+| shell_wait (7) | 0 | 0 | 4 | 2 | 1 | 7 |
+
+- **shell↔bash 交叉双向 0**：模型从不误把该用 shell 判成 bash 或反之。`TOOL_ALIASES` 把它们归 `shell` 一族是**挖矿/配额**用，不是给模型消歧——模型自己分得清。
+
+**真正的主误差是 shell → reply（该跑命令时误判成该回复）**：
+
+- 全量：gold=shell 的 1556 行里模型选 shell 仅 **30.4%**，**选 reply_without_tool 高达 750（48%）**；gold=bash 的 246 行里选 bash 仅 **8.9%**、选 reply 138（56%）。
+- 今天（v8 时代）：gold=shell 146 行 → 选 shell **43.2%**、选 reply 23（16%）；gold=bash 12 行 → 选 bash **75%**。
+- **over-pick（模型选 shell 族、实际不是）**：全量 296（reply 73/edit 72/read 59/compress 41/write 26）、今天 50（read 13/compress 10/reply 9/write 7）。
+
+**解读**：(1) shell 族的短板不是 shell vs bash，而是 **shell vs reply**——模型把该执行命令误判成该直接回复，正是 GRPO 训练里 reply↔动作跷跷板的体现；(2) **v8 已改善**（shell top-1 43.2% vs 全量 30.4%、bash 75% vs 8.9%，方向与 dev 上 shell 76.8% 一致）；(3) 要修 shell 族，重点仍是 reply↔shell 边界，而非 shell/bash 区分。
