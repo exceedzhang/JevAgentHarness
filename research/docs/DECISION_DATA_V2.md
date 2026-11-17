@@ -249,3 +249,8 @@ tool_select 标签采集 ~300-500 条/天（shadow）；dev 264 条。
 - **v8 时代（`--since 2026-11-17 01:18`，~30min，269 tool_select 标签）**：routing **fires at logged tau 10.7%**（vs pooled 28.2%）；tool_select 269 标签**仍无 95% 阈值**（shell 最佳 70.3% / 37 条，read 100% 仅 1 条）；stop 42 无阈值。配置片段同 pooled：tool_select → off/shadow、stop → strong。
 - **解读**：v8 校准（global T=3.877）压平 p_hard → routing 触发从 28.2% 降到 **10.7%**（~89% 步走 fast、省 ~2/3 strong 调用，方向对/省钱）；但存在**路由不足**风险（若 T 压太狠，本应走 strong 的难步被压到 fast，需盯 10.7% 那批 strong 步 vs fast 步的下游成功率）。tool_select 在 v8 时代一致率（shell 70.3%）仍 <95% 且样本仅 30min，**与 dev 逐工具（webfetch/write/edit 弱、shell/read 相对好）交叉一致** → tool_select 维持 shadow。
 - **caveat + 下一步**：v8 时代样本仅 ~30min（269 tool_select / 263 routing），属**方向性结论**；建议每天用 `--since 2026-11-17T01:18Z` 重跑 fit，盯（1）routing 10.7% 是否路由不足（若难例被 fast 漏 → 单独调 routing tau 或 T）、（2）tool_select 逐工具一致率是否收敛到某工具可单独提 act（shell 最有希望）。
+
+### 13.2 v9 轮（read/edit/write 边界，init=v8）+ 裁决（11-17）
+- **v9（read/edit/write 边界成对，train_v9 3146 行，init=v8 final）**：校准后 acc **56.89**（历轮最高，+0.48 vs v8）/ NLL 1.648 / **ECE 0.0425**（历轮最低）/ AUROC 0.6827。三靶心全升：edit 50.0→64.8（**+14.8 最大**）、read 48.5→50.7（+2.2）、write 33.3→38.9（+5.6）；但 **reply 69.1→61.8（−7.3，违反预注册门 4 的 reply>−3pp）**、final_result 100.0→78.6（−21.4，n=14）。校准 global 4.2206 / choice:6-16 4.5747 / 17-52 3.3336。详见 grpo 文档 §23。
+- **裁决（11-17 用户）：维持 v8，v9 不部署**（3/4 门通过、门 4 reply 回退违反；v9 整体最优但砸 reply 高流量工具）。v9 adapter + calibration 入库待命，可切换/回滚。
+- **深层 + 下一步**：v8/v9 都是「整体最佳但各砸一个高流量工具」（v8 砸 write/webfetch、v9 砸 reply）——**边界挖矿的跷跷板在池子挖 ~80% 后边际递减**（与 90%/86% 天花板分析一致，继续挖数据 ROI 低）。建议停止纯边界挖矿，转（a）生产积累真实 glob/webfetch 流量、（b）换机制（工具 schema 感知 prompt / 两段式决策）。

@@ -1055,3 +1055,41 @@ v7 靶心命中但 reply −6.7（跷跷板再现）。v8 假设：把成对机�
 - 评测：`/tmp/eval_v8_{final,final_calibrated,step-000230,step-000285}.json`；日志 `/tmp/grpo_train_v8.log`、`/tmp/v8_watch_eval.log`
 - 配置：`litellm_jah/docker/jah-config.yaml`（v8 校准，commit `fe495e5`）；本地镜像 `litellm-jah:latest` = `litellm-jah:v8`（a6bcfc0e）
 - 队列：`checkpoints/queue_boundary_v8_merged.jsonl`（126 行）
+
+## 23. v9：read/edit/write 边界成对（init=v8）（2026-17）
+
+### 23.1 目标与假设
+v7/v8 已把 reply/webfetch 挖空（v8 后池内 read/reply/edit 挖 ~80%+）。v9 靶心 = **read+edit+write 边界**（剩余可挖），加权 write（v8 最弱 33.3%、write→shell 混淆 9/18）。假设：成对边界同时抬 read/edit/write 三端、不破跷跷板。
+
+### 23.2 挖矿与数据构建
+- family=read+edit+write+webfetch（webfetch 池 2 枯竭）；caps read 180/edit 180/write 62，per-session-tool 20，max-total 600。
+- 生产 fresh 1467 行（较 v8 时 82 大幅积累）；Track A 池 1717 → n_pairs 442 → queue **397**（edit 162/read 180/write 55）；build（base v8 2415）→ selected **318**（read 145/edit 131/write 42，41 会话 top-3 38%）/ extras 731 / **final 3146 行**（`data/train_v9/train_hard_weighted_v9.jsonl`）。
+- 独立 LEAK 复查（train_v9 3146 vs dev 842，键 (session,step,sha256(state)[:16])）：**0**。
+
+### 23.3 训练
+init = **v8 final**（`checkpoints/grpo_train_v8`），train_v9 3146 + `--n-permutations 2`（= 6292 行），其余同 v3-v8 配方（P16/lr 3e-6/beta 0.05/max-len 4608/dev 842 早停）。**394 步跑满**（~6-7h，无早停），in-train dev 走平（峰值 0.5713 早期 = v8 峰值；后段 0.5629–0.5701）→ read/edit/write 挖矿**边际递减**（与数据天花板分析一致）。
+
+### 23.4 验收（dev 842，raw + 校准，n-perm 0 batch 1）
+| 模型 | acc | NLL | ECE | AUROC |
+|---|---:|---:|---:|---:|
+| v8 final（生产，基线） | 56.41 | 1.659 | 0.0578 | 0.6792 |
+| v9 final（raw） | 56.89 | 4.775 | 0.4077 | 0.6639 |
+| **v9 final（校准后）** | **56.89** | 1.648 | **0.0425** | 0.6827 |
+
+校准值（`checkpoints/grpo_train_v9/calibration.json`）：global **4.2206** / choice:6-16 **4.5747** / choice:17-52 **3.3336**（raw NLL 4.78，需缩放）。
+
+逐工具（v8 → v9 校准，Δ，pp）：edit 50.0→**64.8（+14.8，最大）**；read 48.5→**50.7（+2.2）**；write 33.3→**38.9（+5.6）**；bash 69.0→71.4（+2.4）；shell_run 69.0→72.4（+3.4）；not_done 7.1→14.3（+7.1）；shell 76.8→76.2（−0.6）；**reply 69.1→61.8（−7.3，违反门 4）**；**final_result 100.0→78.6（−21.4，n=14 小样本）**；compress/grep/glob/webfetch/execute 持平。
+
+**门判定**：1) read/edit/write 三靶心不降 → 全部上升 ✓；2) acc ≥ v8 56.41 → 56.89 ✓；3) 校准后 NLL/ECE 达标 → 1.648/0.0425（ECE 历轮最低）✓；4) reply > −3pp → **−7.3 ✗ 违反**。
+
+### 23.5 结论：v9 整体最优但 reply 破门，用户裁决维持 v8、v9 不部署
+- v9 校准后**整体历轮最高**（acc 56.89 +0.48 vs v8、ECE 0.0425 最低），三靶心全升（edit +14.8 最大）；但 **reply −7.3**（v8 靶心回退）+ final_result −21.4 → 违反预注册门 4。
+- **深层**：v8/v9 都是「整体最佳但各砸一个高流量工具」（v8 砸 write/webfetch、v9 砸 reply）——**边界挖矿的跷跷板在池子挖 ~80% 后边际递减**，与 90%/86% 天花板分析一致（继续挖数据 ROI 低）。
+- **状态（11-17 用户裁决）：维持 v8，v9 不部署**；`checkpoints/grpo_train_v9`（final）+ `calibration.json`（global 4.2206/choice:6-16 4.5747/17-52 3.3336）入库待命，可随时切换/回滚。
+- 下一步建议：停止纯边界挖矿（池子近枯竭）；转（a）生产积累真实 glob/webfetch 流量、（b）换机制（工具 schema 感知 prompt / 两段式决策）。
+
+### 23.6 产物
+- 数据集：`data/train_v9/{train_hard_weighted_v9.jsonl (3146), train_hard_cases_v9.jsonl (318), MANIFEST_hard_weighted_v9.json}`
+- 适配器：`checkpoints/grpo_train_v9`（final + `calibration.json`）
+- 评测：`/tmp/eval_v9_{final,final_calibrated}.json`；日志 `/tmp/grpo_train_v9.log`、`/tmp/v9_watch.log`
+- 挖矿：`checkpoints/mine_boundary_v9/queue.jsonl`（397 行）
