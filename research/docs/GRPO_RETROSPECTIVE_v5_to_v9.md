@@ -98,7 +98,7 @@ dev 842，v8 = 56.41%（475 对 / 367 错）：
 
 ## 10. 下一步（非挖矿优先）
 1. **停止纯边界挖矿**（ROI 极低），转**生产积累**：让 glob/webfetch/grep/compress 在真实流量里攒 labeled 数据（按月），这些死池只有真实流量能解。
-2. **换机制**（突破天花板的关键）：工具 **schema 感知 prompt**（给模型看工具签名而非仅名字，**首选**）；两段式决策（先粗分类再选工具）**方案 A 已 A/B 否决（见 §11，done 塌 + 没救 shell）**，若要再试需 ≥3 向门保留 done。
+2. **换机制**：三个零成本推断期读法已全部 A/B 否决/无效（schema 感知 −4.87pp / 两段式方案 A −5.11pp / 分组读出方案 B no-op，**详见 §12**）——**"不动数据的推断期"这条路已试尽**；突破天花板得靠真重训（reply↔shell 边界，边际递减）或生产数据。
 3. **tool_tau 逐工具门槛**（`b948a39` 已加）：tool_select 上把 shell/read/bash（一致率 87–90%）单独从 shadow 提为 act，webfetch/write/edit 继续 shadow——低风险先落地。
 4. **routing 充分性监控**：每天 `--since 2026-11-17T01:18Z` 重跑 `jah fit`，盯 routing 10.7% 是否路由不足（若难例被 fast 漏 → 单独调 routing tau 或 T）。
 
@@ -132,3 +132,24 @@ Stage-1 门：73% 判"动作"，reply 召回 55.2%、动作召回 79.9%（门不
 
 **产物**：`/tmp/twostage_ab.py`、`/tmp/twostage_ab.json`（overall/stage1/by_tool/confusion 全量）。
 5. **v9 待命**：v9 adapter（56.89%/ECE 0.0425，历轮最高）+ 校准入库，若线上 reply 切片表现可接受，可切 v9 上线（当前维持 v8）。
+
+## 12. 三个推断期 trick 全部试完（2026-11-18）：A / schema / B 均不动 reply↔shell
+
+§7/§10 的「换机制」里，有 3 个**不动数据、不改模型权重**的推断期读法，本周期全部做了零风险 A/B（独立 /tmp 脚本 + v8 adapter + dev 842，未动生产）：
+
+| 方案 | 形式 | 结果（整体 acc） | 逐工具关键点 | 判定 |
+|---|---|---:|---|---|
+| A 两段式二元门 | `{reply, __ACT__}` 门 + stage-2 | 51.31（−5.11） | done 92.3→0、reply −14.5、**shell 76.8 不变** | ❌ 否决（§11） |
+| schema 感知 | 选项改 `name -- 描述` | 51.54（−4.87） | shell 76.8→65.5、edit→29.5、reply 过选更重 | ❌ 否决 |
+| B 分组读出 | reply 仅当 `p(reply)>Σ其余` 才赢，否则 argmax 其余 | **56.41（0，no-op）** | 全部逐工具 Δ=0、shell→reply 24 不变 | ⚪ 无作用 |
+
+**为什么三者都动不了 reply↔shell（统一解释）**：
+- 主误差 **shell→reply（24 条）** 是模型概率分布里"焊死"的——p 把本应给 shell 的质量错给了 reply。
+- 三个 trick 都是**只重读/重排同一个 p，不改 p 的底层**：
+  - 方案 A、schema 还引入了**分布外格式**（`__ACT__` 没训过 / `name -- desc` 没训过）；v8 在裸名上训，OOD 直接伤害（shell 反而更差）。
+  - 方案 B 把整分布切成 {reply} vs {其余}，而「其余」= 1 − p(reply)（互补），门退化成「p(reply)>0.5」；v8 的 reply 只要是最优解 p 都 >0.5，**一条决策都没变**（no-op）。
+- **结论**：reply↔shell 这个结构核心误差，**推断期重读/重排/加描述都修不了**，除非改 p 本身（= 重训 reply↔shell 边界，边际递减）或换真正的新机制/数据。
+
+**含义**：换机制里"零成本推断期"这条路**已试尽**（A/schema/B 全负或无效）。真正能动的回到 §10.1（生产积累 + 时间切分 dev）与 §10.2 的真重训（reply↔shell 边界数据，接受边际递减/跷跷板），或接受 ~72-78% 天花板。
+
+**产物**：`/tmp/schema_ab.py`、`/tmp/schema_ab.json`、`/tmp/planB_ab.py`、`/tmp/planB_ab.json`（均 dev 842、v8 adapter、argmax 口径）。
