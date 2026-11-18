@@ -221,7 +221,9 @@ def _load(a: argparse.Namespace, dtype: torch.dtype) -> tuple[Any, Any, Any]:
 
     from .train_decision import load_causal_lm
 
-    tok = AutoTokenizer.from_pretrained(a.init or a.model)
+    # Tokenizer always from the base model, never from the --init adapter dir: an adapter checkpoint may
+    # carry a stale tokenizer_config.json (e.g. extra_special_tokens as a list) that breaks newer transformers.
+    tok = AutoTokenizer.from_pretrained(a.model)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
@@ -552,7 +554,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     bf16 = bool(a.bf16 and torch.cuda.is_available())
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(a.init or a.model)
+    tok = AutoTokenizer.from_pretrained(a.model)  # base tokenizer, not a.init (adapter may carry a stale/broken tokenizer_config)
     examples = read_jsonl(a.train)
     if a.max_examples:
         examples = examples[: a.max_examples]
