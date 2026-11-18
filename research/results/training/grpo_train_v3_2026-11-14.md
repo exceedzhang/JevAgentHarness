@@ -1155,4 +1155,60 @@ in-train dev 轨迹：早期峰 0.5713（step 20-30）→ 中段振荡 0.5606-0.
 - 适配器：`checkpoints/grpo_train_v10`（final + `calibration.json`）
 - 评测：`/tmp/eval_v10_{final,final_calibrated}.json`；日志 `/tmp/grpo_train_v10.log`、`/tmp/v10_watch.log`
 - 挖矿脚本：`research/scripts/mine_boundary_pairs.py --decisions`；死池追踪：`research/scripts/decisions_daily.py`
+
+## 25. v11：schema 感知重训（name -- desc，init=AgentDecision-4B Nov1 原版）（2026-11-18/19）
+
+### 25.1 目标与假设
+v7-v10 确认数据天花板 ~72-78%（挖矿枯竭 + 换真实死池数据都没动 glob/grep/webfetch 死池），三个推断期 trick 全废。v11 换**根本机制 = 表征**：把 prompt options 从裸名改成 `name -- desc`（真实工具语义），假设模型混淆 reply↔shell / 死池 glob/grep/webfetch 的根因之一是"选项只是一个名字、缺乏语义边界"，加描述能建立更锐利的工具判别。init 用 **AgentDecision-4B（Nov 1 原版，v3-v10 GRPO 前基线，md5 661b34）** 而非 v8（用户明确"不从 v8 开始"，避免继承 v8 裸名偏见，干净归因格式变量）。base 维持 Qwen3-4B 不动。
+
+### 25.2 格式（方案 A）
+- 27 个 core 工具（= dev 842 全部 gold 工具）→ `name -- desc`（描述源 `data/tool_desc.json`，真实 JAH 语义）；200 个 MCP 工具（全 distractor、gold=0）保持裸名。
+- 生产侧同用共享 `data/tool_desc.json` 只给这 27 个描述 → **训练/生产逐字节一致**（方案 A，最小改动）。
+- 数据 `data/train_v11/{train_hard_weighted_v11.jsonl (3536), dev.jsonl (842), ...}`（options + target 键同步转 `name -- desc`），**LEAK 0**（transform 不改 state/session/step，dedup key 不变，同 v10）。
+
+### 25.3 训练
+init = AgentDecision-4B（Nov1 原版）；train_v11 3536 + `--n-permutations 2`（7072 行）；P16 配方（lr3e-6 / beta0.05 / max-len4608）、dev 842 早停 patience 5/min 60、1 epoch 442 步、GPU1、`--rewards correct`。
+
+in-train dev 轨迹：起步 ~0.477（Nov1 基线比 v8/v9 弱，符合预期）→ 缓慢爬升 → **峰 0.5119（step 440）= final**（跑满 442 步，无早停）。全程低于 v8/v9 的 ~0.565；`frac_zero_std` 末段升到 0.94（已收敛，继续训不涨）。
+
+### 25.4 验收（dev 842，n-perm 0 batch 1，name--desc）
+| 模型 | acc | NLL（校准后） | ECE（校准后） | AUROC |
+|---|---:|---:|---:|---:|
+| v8（生产，裸名） | 56.41 | 1.659 | 0.0578 | 0.6792 |
+| v9（历轮最优，裸名） | 56.89 | 1.648 | 0.0425 | 0.6827 |
+| **v11（name--desc）** | **51.19** | 1.725 | 0.052 | 0.6779 |
+
+> 口径：v11 在 name--desc dev 评、v8/v9 在裸名 dev 评，但**同 842 个决策**（同 state / 同 gold，仅 option 渲染不同），逐工具可比。
+
+raw（未校准）：acc 51.19 / NLL 3.416 / Brier 0.405 / ECE 0.410 / mean_conf **0.920**（过度自信）。校准 global **3.079**（**首次下降**：v8 3.877 → v9 4.22 → v10 4.51 → **v11 3.079**，schema 让 raw 概率更分散）→ 校准后 ECE 0.052（达标）、NLL 1.725、AUROC 0.6779。
+
+逐工具（v11 vs v8，n≥13，acc%）：
+
+| 工具 | n | v8 | v11 | Δ |
+|---|---:|---:|---:|---:|
+| read | 134 | 48.5 | **67.9** | **+19.4** |
+| webfetch | 23 | 30.4 | **47.8** | **+17.4** |
+| compress | 27 | 14.8 | 25.9 | +11.1 |
+| edit | 88 | 50.0 | 56.8 | +6.8 |
+| shell | 168 | 76.8 | 71.4 | −5.4 |
+| write | 18 | 33.3 | 22.2 | −11.1 |
+| bash | 42 | 69.0 | 40.5 | **−28.5** |
+| reply | 165 | 69.1 | **31.5** | **−37.6** |
+| grep | 22 | 4.5 | 4.5 | 0（死池没动）|
+| glob | 15 | 0.0 | 0.0 | 0（死池没动）|
+
+**门判定（开训前写死）**：1) schema 让整体 acc ≥ v8 56.41 → ✗（51.19，−5.2pp）；2) reply 不大幅回退 → ✗（reply 69.1→31.5，−37.6）；3) 校准后 NLL/ECE 达标 → ✓（1.725 / 0.052）。→ **主门 ✗**。
+
+### 25.5 结论：v11 不部署，schema 引入系统性"过度动作"偏置
+- **假设部分成立但净负**：schema 确实让"行动类"工具判别更锐利 —— read **+19.4** / webfetch **+17.4** / compress +11.1 / edit +6.8 全升（描述帮模型建立"该用哪个行动工具"的边界）。**但**给工具加描述让 act 类工具变"更抢手"，模型系统性**过度动作**：reply 该停手时疯狂发 read(50) / edit(34)，reply 崩塌 **−37.6**、bash −28.5。净 **−44 个正确**（v8 475 → v11 431）。
+- **新发现（重要，改写候选清单 E3 方向判断）**：v8/v9/v10（裸名）主误差 = **欠动作**（gold=shell→reply）；v11（schema）主误差翻转为**过度动作**（gold=reply→tool，reply→read 50 + reply→edit 34 = 84 条）。**主误差方向随"格式"翻转**——方向性惩罚 E3 不能一刀切，必须跟随目标模型误差方向。用户 @431@ 原提案（gold=reply→tool 罚 −1）在 v8 时代罚的是少数派，**但在 schema 模型上恰好命中主误差**。
+- **死池仍没动**（glob 0 / grep 4.5）→ **数据天花板第四次确认**：换机制（schema 表征）同样破不了，且 schema 净负（比 v8 差 5.2pp）。
+- **状态（11-19）：v11 不部署，生产维持 v8**；`checkpoints/grpo_train_v11`（final，51.19）+ `calibration.json`（global 3.079）入库待命。
+
+### 25.6 产物
+- 数据集：`data/train_v11/{train_hard_weighted_v11.jsonl (3536), dev.jsonl (842), ...}`；描述源 `data/tool_desc.json`（27 core，训练/生产共享）
+- 数据变换：`research/scripts/transform_schema_v11.py`；工具清单：`research/scripts/list_tools_v11.py`
+- 适配器：`checkpoints/grpo_train_v11`（final + `calibration.json` global 3.079）
+- 评测：`/tmp/eval_v11_{final,final_calibrated}.json`；日志 `/tmp/grpo_train_v11.log`、`/tmp/v11_watch.log`
+- 部署前提（若采纳 schema）：生产 render 同步改 `option_text(label, desc)` + 重校准，两侧原子改；且须先解决"过度动作"偏置（见 E3 方向修正）。
 - 挖矿：`checkpoints/mine_boundary_v9/queue.jsonl`（397 行）
