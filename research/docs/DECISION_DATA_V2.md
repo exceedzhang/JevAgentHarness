@@ -286,3 +286,13 @@ tool_select 标签采集 ~300-500 条/天（shadow）；dev 264 条。
 - **门判定 2✓2✗**（死池净提升 ✗、acc≥v9 ✗；reply 守门 ✓、NLL/ECE ✓）→ **v10 不部署，生产维持 v8**；v10 adapter + 校准入库待命。
 - **天花板第三次确认（关键）**：v9（挖 train_v4 池）没动死池 + v10（挖生产真实死池数据）也没动 → 证明 **glob/grep/webfetch 不是"缺数据"，是结构性的**（模型没建立边界判别，或 dev 样本太小 ±10pp 全噪声）；**换数据源同样破不了 ~72-78% 硬顶**。
 - **至此所有路线已试完**：边界挖矿（v5-v9 枯竭）+ 换真实数据（v10 死池没动）+ 三个推断期 trick（schema −4.87 / 两段式 −5.11 / 分组读出 no-op）= 现有机制+数据下 **v8 即局部最优**。再往前：① 持续生产积累慢慢喂（glob 今日 19 在涨）+ ② 换根本机制（schema 感知需重训、或更强 base）。
+
+### 13.5 v11 轮：schema 感知重训（进行中）+ 之后的候选实验清单
+
+- **v11（schema 感知重训）**：prompt options 从裸名改 `name -- desc`（真实工具语义），init = **AgentDecision-4B（Nov 1 原版，v3-v10 GRPO 前基线）**，不用 v8（用户明确）。格式 **方案 A**：27 个 core 工具 name--desc + 200 个 MCP 工具保持裸名；生产侧同用共享 `data/tool_desc.json` 只给这 27 个描述 → 训练/生产逐字节一致。数据 `data/train_v11/`（train 3536 / dev 842，LEAK 0），配方不变（correct 二元、P16、lr3e-6、beta 0.05、dev842 早停），GPU1、~8h、out `checkpoints/grpo_train_v11`。
+- **推理侧前提**：生产 render 必须同步改 `option_text(label, desc)`（否则训 name--desc、推裸名 = OOD 反向伤害）；部署 = 训练+推理两侧原子改 + 重校准。
+- **v11 之后的候选实验清单**（详细定义/风险/裁决口径见 `GRPO_RETROSPECTIVE_v5_to_v9.md` §13）：
+  1. **E1 `soft` 奖励**（reward=target[k]，`grpo_trl.py` 已实现未启用）：对"选到次优"给部分分；仅当 target 非 one-hot 才有区分度，否则退化= correct。
+  2. **E2 KL reference 锚点**（v11 特有微妙点，**优先排查**）：v11 的 reference = AgentDecision-4B（裸名时代），beta 0.05 会把 schema 模型往裸名行为拉，与新格式方向轻微冲突；若 v11 schema 没吃透，先查这里（杠杆：降 beta / 换 reference / 关 KL）。
+  3. **E3 方向性惩罚**（用户提案：gold=reply 却选 tool → −1）：**方向需先校准**——dev/生产主误差是反方向的**欠动作**（gold=shell 却选 reply，生产 48%），原提案罚的是少数派；修正为反向罚（gold=tool→reply −1）或双向非对称。
+  4. 顺序：v11 → E2 → E1 → E3，各单跑、独立归因，禁止混跑。

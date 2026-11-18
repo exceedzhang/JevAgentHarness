@@ -153,3 +153,51 @@ Stage-1 门：73% 判"动作"，reply 召回 55.2%、动作召回 79.9%（门不
 **含义**：换机制里"零成本推断期"这条路**已试尽**（A/schema/B 全负或无效）。真正能动的回到 §10.1（生产积累 + 时间切分 dev）与 §10.2 的真重训（reply↔shell 边界数据，接受边际递减/跷跷板），或接受 ~72-78% 天花板。
 
 **产物**：`/tmp/schema_ab.py`、`/tmp/schema_ab.json`、`/tmp/planB_ab.py`、`/tmp/planB_ab.json`（均 dev 842、v8 adapter、argmax 口径）。
+
+## 13. v11 之后的候选实验清单（奖励 / 参考分布 / 方向性惩罚，待 v11 结论后逐个单跑）
+
+> 纪律：**一轮一假设**。下面每一项 = 同数据（train_v11，name--desc）、同配方（P16/lr3e-6/dev842 早停），只改一个变量（reward 或 KL reference 或方向性惩罚项），单独成轮、单独归因。v11 只验证「schema 表征」一个假设，reward 维持 `correct` 不动。v11 结论出来后再排这些。
+
+### 13.0 当前基线（v3-v11 一致）
+- reward = `correct`（二元，`grpo_trl.py` `make_reward_funcs` → `option_reward`）：采样选项 k，`r = 1.0 if k == gold else 0.0`，gold = target 向量 argmax（`gold = int(max(range(n), key=lambda k: tgt[k]))`）。选对 1 / 选错 0，无部分分、无格式分。
+- KL 惩罚在 **loss 项**（`beta=0.05`），不在 reward。reference = `--init` 适配器（frozen copy，作 TRL ref adapter）。
+- P16 每 prompt 采 16 条，组内归一化 advantage（`--scale-rewards group`）；`--skip-zero-std` 丢 16 条全同奖励（零方差）的组 → 梯度集中在不确定边界例。
+
+### 13.1 E1：`soft` 奖励（代码已实现，未启用）
+- **定义**（`grpo_trl.py` `soft`，约 L135-138）：`r = float(target[k])`（选到的选项 k 在 gold target 里的概率），k 非法则 0。即把 gold 的**软分布**当奖励，不再是 0/1。
+- **假设**：对「总是选错但选到次优」的组（如 shell 例总选 bash）给非零梯度，把边界从「全错」往「次优→正」推；对 one-hot 目标无差别。
+- **适用条件**：仅当 target 是**非 one-hot**（teacher-soft / MC 目标）才有区分度。若 target 基本 one-hot（当前 train 多为 one-hot），E1 退化成 correct，**收益≈0**——故 E1 需先确认/改造成软 target，否则空转。
+- **风险**：部分分会把锐利边界「糊」化；我们当前要的是锐利 reply↔shell 边界，soft 可能反向削弱 → 需 A/B。
+- **裁决口径**：同 v11 数据，只把 `--rewards correct` 换成 `--rewards soft`（target 改软），逐工具 + 混淆矩阵 + NLL/ECE 对比 v11。
+
+### 13.2 E2：KL reference 锚点（v11 特有的微妙点，优先排查项）
+- **微妙点**：v11 的 `--init` = reference = **AgentDecision-4B（Nov 1 原版，裸名时代训练）**。beta 0.05 的 KL 会把 schema-aware 新模型往「裸名行为」方向拉，与「学 `name -- desc` 新格式」**方向上轻微冲突**——KL 锚点本身是旧格式的代表。
+- **优先级**：如果 v11 训完发现 **schema 没吃透**（模型仍偏裸名风格 / `name -- desc` 的增益不明显），**第一个该查的就是这个 KL 锚点**（而不是 reward 本身）。
+- **三个可动杠杆**（各成单独实验）：
+  1. **降 beta**（0.05 → 0.01/0.0）：削弱向旧格式的回拉，代价是偏离 reference 更自由。
+  2. **换 reference**：reference 改成 base Qwen3-4B（无格式偏见，但无决策先验）或一个 schema 格式 SFT（与训练格式一致，最理想但需先产 SFT）。
+  3. **关 KL**（beta=0）：完全无锚，看 schema 是否更快吃透 + 是否发散。
+- **风险**：beta 0.05 本就温和，影响大概率有限；但这是唯一「与 v11 新格式方向不一致」的项，值得作为第一排查。
+- **裁决口径**：v11 基础上只改 beta / reference，其余不动。
+
+### 13.3 E3：非对称 / 方向性惩罚（用户 @431@ 提案，方向需先校准）
+- **原始提案**：`gold = reply_without_tool` 但选了某个 tool → 罚 −1（即「该回话却去动工具」加重罚）。
+- **方向性核查（关键）**：提案罚的是**过度动作**（gold=reply 选 tool）。但 dev / 生产主误差方向是**欠动作**：
+  - dev 主混淆 = **gold=tool（尤其 shell）→ 选 reply**（shell→reply 24+ 条，shell 召回被压低）；过度动作（gold=reply→选 tool）数量明显少。
+  - 生产 `shell→reply` 48%（本应 shell 却 reply）= **欠动作**。
+  - 所以 E3 若按原方向只罚「gold=reply 选 tool」，**罚的是少数派**，与主误差**方向相反**。
+- **修正方案**（择一，单跑）：
+  1. **反向**：gold=tool 但选了 reply → 罚 −1（直击欠动作主误差，shell 召回优先）。
+  2. **双向非对称**：欠动作（gold=tool→reply）罚 −1，过度动作（gold=reply→tool）罚 −0.5（或 0），按实际错误频率加权。
+  3. 若坚持原方向，须先跑数据确认「gold=reply→tool」在生产/dev 的真实频率，证明该方向值得单独罚。
+- **风险**：二元 correct 已能表达「选错=0」，加 −1 是把它变**三元**（对 / 可接受错 / 重罚错），改了 advantage 量纲 → 与 `--scale-rewards group` + `--skip-zero-std` 的交互需重新观察（frac_zero_std 会变）。
+- **裁决口径**：同 v11 数据，reward 从 correct 换成「correct + 方向性惩罚」，逐工具重点看 shell 召回 + reply 误报双向。
+
+### 13.4 执行顺序建议
+1. 先跑完 v11（schema 假设）→ 得基线数字。
+2. 若 v11 schema 增益不明显 → **先 E2**（KL reference，最可能是 schema 没吃透的元凶）。
+3. 再 E1（soft，需先确认 target 是否软）。
+4. 最后 E3（方向性惩罚，需先定方向）。
+- 每项独立 commit + 独立结果章节 + 按 §22-24 的预注册门（逐工具 + 混淆矩阵 + NLL/ECE）裁决，禁止混跑。
+
+**状态**：清单待命；v11 训练中（init=AgentDecision-4B，方案 A：27 core name--desc + 200 MCP 裸名）。
