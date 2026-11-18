@@ -277,3 +277,12 @@ tool_select 标签采集 ~300-500 条/天（shadow）；dev 264 条。
 - **over-pick（模型选 shell 族、实际不是）**：全量 296（reply 73/edit 72/read 59/compress 41/write 26）、今天 50（read 13/compress 10/reply 9/write 7）。
 
 **解读**：(1) shell 族的短板不是 shell vs bash，而是 **shell vs reply**——模型把该执行命令误判成该直接回复，正是 GRPO 训练里 reply↔动作跷跷板的体现；(2) **v8 已改善**（shell top-1 43.2% vs 全量 30.4%、bash 75% vs 8.9%，方向与 dev 上 shell 76.8% 一致）；(3) 要修 shell 族，重点仍是 reply↔shell 边界，而非 shell/bash 区分。
+
+### 13.4 v10 轮：生产真实死池数据挖矿 + 天花板第三次确认（11-18）
+
+- **v10（挖生产累积的真实死池样本 glob/grep/compress/webfetch 边界对，init=v9）**：`decisions.jsonl`（13319 行）含 `state`（8700 行）+ `label`（5012）→ 死池带 state 可挖（glob 47/webfetch 30/grep 127/compress 216/websearch 7）；挖矿 prod_fresh 1609 / queue 221；构建 base v9 3146 → **train_v10 3536 行**（selected 136 / extras 390），**LEAK 0**。
+- **训练 + 验收**：442 步跑满（in-train 峰 0.5748）；校准后 dev 842 = acc **56.41** / NLL 1.658 / ECE 0.0636 / AUROC 0.6779（v9 56.89/1.648/0.0425、v8 56.41/1.659/0.0578）；校准 global **4.5067**（温度继续升）。
+- **逐工具（v10 vs v9）**：死池几乎全没动 —— glob 0（=0）、grep 4.5（=4.5）、webfetch 30.4（=30.4），仅 compress 14.8→18.5（+3.7，27 样本≈1 条，噪声级）；read +3.7、edit −4.5、bash −9.5、reply +0.6（守门）。
+- **门判定 2✓2✗**（死池净提升 ✗、acc≥v9 ✗；reply 守门 ✓、NLL/ECE ✓）→ **v10 不部署，生产维持 v8**；v10 adapter + 校准入库待命。
+- **天花板第三次确认（关键）**：v9（挖 train_v4 池）没动死池 + v10（挖生产真实死池数据）也没动 → 证明 **glob/grep/webfetch 不是"缺数据"，是结构性的**（模型没建立边界判别，或 dev 样本太小 ±10pp 全噪声）；**换数据源同样破不了 ~72-78% 硬顶**。
+- **至此所有路线已试完**：边界挖矿（v5-v9 枯竭）+ 换真实数据（v10 死池没动）+ 三个推断期 trick（schema −4.87 / 两段式 −5.11 / 分组读出 no-op）= 现有机制+数据下 **v8 即局部最优**。再往前：① 持续生产积累慢慢喂（glob 今日 19 在涨）+ ② 换根本机制（schema 感知需重训、或更强 base）。

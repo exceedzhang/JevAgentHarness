@@ -1092,4 +1092,67 @@ init = **v8 final**（`checkpoints/grpo_train_v8`），train_v9 3146 + `--n-perm
 - 数据集：`data/train_v9/{train_hard_weighted_v9.jsonl (3146), train_hard_cases_v9.jsonl (318), MANIFEST_hard_weighted_v9.json}`
 - 适配器：`checkpoints/grpo_train_v9`（final + `calibration.json`）
 - 评测：`/tmp/eval_v9_{final,final_calibrated}.json`；日志 `/tmp/grpo_train_v9.log`、`/tmp/v9_watch.log`
+
+## 24. v10：生产真实死池数据挖矿（glob/grep/compress/webfetch，init=v9）（2026-11-18）
+
+### 24.1 目标与假设
+
+v5-v9 把 `data/train_v4/train` 池挖到 ~80% 后边际递减，v9 证实 reply/edit/read 池近枯竭；死池 **glob / webfetch / grep / compress** 长期纹丝不动（glob 0%、grep 4.5%、compress 14.8%、webfetch 30.4%），此前的根因假设是"池子枯竭（train_v4 只有 glob 3 / webfetch 2）"。v10 假设：**改用生产新累积的真实死池样本挖边界对**，能喂进训练池里没有的 glob/grep/compress/webfetch 边界，修死池 → 突破前几轮的天花板。这是复盘 §10"等生产积累"路线的第一次落地（死池累积追踪 `decisions_daily.py` 确认生产已累计 glob 51 / webfetch 33 / grep 137 / compress 227 真实样本）。
+
+### 24.2 挖矿与数据构建
+
+- **数据源**：`decisions.jsonl`（本地 JAH 容器，13319 行，Nov1→Nov18），**含 `state` 字段（8700/13319）+ `label`（5012）** → 死池带 state 可挖：glob 47 / webfetch 30 / grep 127 / compress 216 / websearch 7 = 427。
+- **挖矿**（`mine_boundary_pairs.py --decisions`，family=glob,webfetch,grep,compress,reply,shell,read,edit，shell cap 0，exclude 全集=train_v3_clean v1-3 + train_v4 四文件 + train_v5-v9 + 四 merged queues）：pool_rows 0（train_v4 池无死池对）/ **prod_fresh 1609** / n_pairs 483 / **queue 221**（compress 57 / edit 40 / glob 29 / grep 53 / read 40 / webfetch 2）。
+- **构建**（`build_hard_weighted.py --base data/train_v9/train_hard_weighted_v9.jsonl --dev-dir data/train_v4 --queue 死池队列 --version v10 --tool-caps {glob30,webfetch10,grep60,compress70,read50,edit50}`）：selected **136**（compress 43 / edit 20 / glob 26 / grep 39 / read 7 / webfetch 1；21 会话；top ses_e17744 41 行=30%）/ extras **390** / **final 3536 行**（base v9 3146 + 390）。truncated 85。
+- **独立 LEAK 复查 = 0**（dev 842 keys vs train_v10 2037 unique keys）。
+- 分布 v9→v10：compress/grep/glob 加权后上升（死池），其余持平。
+
+### 24.3 训练
+
+init = **v9 final**（`checkpoints/grpo_train_v9`，历轮最强 56.89）；train = train_v10 3536 + `--n-permutations 2`（7072 行，已确认）；P16 配方、dev 842 早停 patience 5/min 60、~442 步 ~8h。
+
+in-train dev 轨迹：早期峰 0.5713（step 20-30）→ 中段振荡 0.5606-0.5748（**峰 0.5748**，step ~255）→ final 步 ~0.5677。**跑满 442 步（~8h），无早停**（振荡重置 patience）。大量 `frac_zero_std=1.0` no-op（v9 强 init 已解对多数，死池增广产不出梯度）。
+
+### 24.4 验收（dev 842，n-perm 0 batch 1）
+
+| 模型 | acc | NLL（校准后） | ECE | AUROC |
+|---|---:|---:|---:|---:|
+| v8（生产） | 56.41 | 1.659 | 0.0578 | 0.6792 |
+| v9（历轮最优） | **56.89** | 1.648 | **0.0425** | 0.6827 |
+| **v10** | 56.41 | 1.658 | 0.0636 | 0.6779 |
+
+校准值（`checkpoints/grpo_train_v10/calibration.json`）：global **4.5067** / choice:6-16 **4.8445** / choice:17-52 **3.5937**（温度继续升：v8 3.88 → v9 4.22 → v10 4.51）。
+
+逐工具（v10 vs v9 vs v8，n≥13，acc%）：
+
+| 工具 | n | v10 | v9 | v8 |
+|---|---:|---:|---:|---:|
+| read | 134 | **54.5** | 50.7 | 48.5 |
+| edit | 88 | 60.2 | 64.8 | 50.0 |
+| shell | 168 | 76.2 | 76.2 | 76.8 |
+| reply | 165 | 62.4 | 61.8 | 69.1 |
+| bash | 42 | 61.9 | 71.4 | 69.0 |
+| **compress** | 27 | **18.5** | 14.8 | 14.8 |
+| **grep** | 22 | 4.5 | 4.5 | 4.5 |
+| **glob** | 15 | 0.0 | 0.0 | 0.0 |
+| **webfetch** | 23 | 30.4 | 30.4 | 30.4 |
+| write | 18 | 38.9 | 38.9 | 33.3 |
+| execute | 13 | 38.5 | 30.8 | 30.8 |
+
+**门判定（开训前写死）**：1) 死池 glob/grep/compress/webfetch 净提升 → ✗（4 个里只有 compress +3.7 微升，glob/grep/webfetch 全 0）；2) reply 不大幅回退 → ✓（vs v9 +0.6）；3) 整体 acc ≥ v9 56.89 → ✗（56.41 < 56.89）；4) 校准后 NLL/ECE 达标 → ✓（1.658/0.064）。→ **2✓ 2✗**。
+
+### 24.5 结论：v10 不部署，数据天花板第三次确认
+
+- **假设否决**：换用生产真实死池数据（glob 26/grep 39/compress 43 边界对），死池工具**几乎全没动** —— glob 仍 0%、grep 仍 4.5%、webfetch 仍 30.4%，只有 compress +3.7（27 样本 ≈ 1 条，噪声级）。整体 56.41 = v8、< v9 56.89。
+- **天花板第三次确认**：v9（挖 train_v4 池）没动死池 + v10（挖生产真实死池数据）也没动 → **铁证这 4 个死池工具不是"缺数据"，是结构性的**（模型没建立 glob/grep/webfetch 的边界判别，或 dev 样本太小 ±10pp 全噪声）。**换数据源同样突破不了 ~72-78% 硬顶**。
+- **状态（11-18）：v10 不部署，生产维持 v8**；`checkpoints/grpo_train_v10`（final）+ `calibration.json`（global 4.5067）入库待命。
+- **至此所有路线已试完**：边界挖矿（v5-v9 枯竭）+ 换真实数据（v10 死池没动）+ 三个推断期 trick（schema −4.87 / 两段式 −5.11 / 分组读出 no-op）= 现有机制+数据下 **v8 即局部最优**。再往前的唯一路径：① 持续生产积累慢慢喂（glob 今日 19 在涨）+ ② 换根本机制（schema 感知需重训、或更强 base）。
+
+### 24.6 产物
+
+- 数据集：`data/train_v10/{train_hard_weighted_v10.jsonl (3536), train_hard_cases_v10.jsonl (136), MANIFEST_hard_weighted_v10.json}`
+- 挖矿队列：`checkpoints/mine_deadpool_v10/queue.jsonl`（221 行）
+- 适配器：`checkpoints/grpo_train_v10`（final + `calibration.json`）
+- 评测：`/tmp/eval_v10_{final,final_calibrated}.json`；日志 `/tmp/grpo_train_v10.log`、`/tmp/v10_watch.log`
+- 挖矿脚本：`research/scripts/mine_boundary_pairs.py --decisions`；死池追踪：`research/scripts/decisions_daily.py`
 - 挖矿：`checkpoints/mine_boundary_v9/queue.jsonl`（397 行）
