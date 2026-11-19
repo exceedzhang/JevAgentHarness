@@ -291,9 +291,16 @@ tool_select 标签采集 ~300-500 条/天（shadow）；dev 264 条。
 
 - **v11（schema 感知重训）**：prompt options 从裸名改 `name -- desc`（真实工具语义），init = **AgentDecision-4B（Nov 1 原版，v3-v10 GRPO 前基线）**，不用 v8（用户明确）。格式 **方案 A**：27 个 core 工具 name--desc + 200 个 MCP 工具保持裸名；生产侧同用共享 `data/tool_desc.json` 只给这 27 个描述 → 训练/生产逐字节一致。数据 `data/train_v11/`（train 3536 / dev 842，LEAK 0），配方不变（correct 二元、P16、lr3e-6、beta 0.05、dev842 早停），GPU1、~8h、out `checkpoints/grpo_train_v11`。
 - **推理侧前提**：生产 render 必须同步改 `option_text(label, desc)`（否则训 name--desc、推裸名 = OOD 反向伤害）；部署 = 训练+推理两侧原子改 + 重校准。
-- **v11 结果（11-19，不部署）**：dev 842 = acc **51.19**（< v8 56.41，−5.2pp；raw NLL 3.416 / 校准后 1.725 / ECE 0.052；校准 global **3.079 首次下降** v8 3.877→v10 4.51→v11 3.079）。逐工具：read **+19.4** / webfetch **+17.4** / compress +11.1 / edit +6.8（act 类升）但 **reply −37.6** / bash −28.5（**过度动作崩塌**）；死池 glob 0 / grep 4.5 没动。机制 = schema 让 act 类工具"更抢手"，模型系统性**过度动作**（reply 该停手时发 read(50)/edit(34)）。**门主 ✗（acc 不及 v8 + reply 大幅回退）→ v11 不部署，生产维持 v8；数据天花板第四次确认**（换 schema 表征也破不了 ~72-78%，且净负）。详见 grpo 文档 §25。
+- **v11 结果（11-19，不部署）**：dev 842 = acc **51.19**（< v8 56.41，−5.2pp；raw NLL 3.416 / 校准后 1.725 / ECE 0.052；校准 global **3.079 首次下降** v8 3.877→v10 4.51→v11 3.079）。逐工具：read **+19.4** / webfetch **+17.4** / compress +11.1 / edit +6.8（act 类升）但 **reply −37.6** / bash −28.5（**过度动作崩塌**）；死池 glob 0 / grep 4.5 没动。机制 = schema 让 act 类工具"更抢手"，模型系统性**过度动作**（reply 该停手时发 read(50)/edit(34)）。**门主 ✗（acc 不及 v8 + reply 大幅回退）→ v11 不部署，生产维持 v8；数据天花板第四次确认**（换 schema 表征也破不了 ~72-78%，且净负）。详见 grpo 文档 §3/§6 表。
 - **v11 之后的候选实验清单**（详细定义/风险/裁决口径见 `GRPO_RETROSPECTIVE_v5_to_v9.md` §13）：
   1. **E1 `soft` 奖励**（reward=target[k]，`grpo_trl.py` 已实现未启用）：对"选到次优"给部分分；仅当 target 非 one-hot 才有区分度，否则退化= correct。
   2. **E2 KL reference 锚点**（v11 特有微妙点，**优先排查**）：v11 的 reference = AgentDecision-4B（裸名时代），beta 0.05 会把 schema 模型往裸名行为拉，与新格式方向轻微冲突；若 v11 schema 没吃透，先查这里（杠杆：降 beta / 换 reference / 关 KL）。
   3. **E3 方向性惩罚**（用户提案：gold=reply 却选 tool → −1）：**方向必须跟随目标模型误差方向**（v11 实证）——裸名模型（v8/v9/v10）主误差 = **欠动作**（gold=shell→reply，生产 48%），但 **v11（schema）主误差翻转为过度动作**（gold=reply→tool，reply→read 50 + reply→edit 34）。即：裸名该罚"欠动作"、schema 该罚"过度动作"（= 用户原提案方向）；建议双向非对称或按目标模型误差方向 A/B 定。
   4. 顺序：v11 → E2 → E1 → E3，各单跑、独立归因，禁止混跑。
+
+### 13.6 候选实验 E2a + E3 实测（11-19/20）—— 奖励 / 参考分布线走死，天花板第五次确认
+
+- **E2a（弱 KL β0.05→0.01）→ REJECTED**：acc 50.11（< v11 51.19，−1.08pp）；KL 1.31→4.18（弱锚更远离 ref，符合预期）；reply 31.5→24.2（过度动作更重）。**结论：KL 锚非瓶颈**，v11 过度动作是 schema 格式使 act 类"更抢手"，不是 ref 拽的。
+- **E3（方向性惩罚 `reply_bound`：gold=reply 选 tool→−1）→ REJECTED（灾难性）**：acc 46.56（−4.63pp）；**reply 31.5→0.00（塌到 0，一次没选 reply）**。机制：−1 负奖励 + GRPO 组归一化 + `--skip-zero-std` 交互 → reply-gold 点 16 采样多为 tool 全拿 −1 → 零方差被 skip（无梯度），真正有梯度的只有本已对的组 → 净效果是把 reply 概率整体压到≈0，而非学会"何时 reply"。副作用 read/webfetch +6~8pp（"扫到地毯下"：放弃 reply 换 tool 精度）。**教训：GRPO 框架里加负奖励 = 系统性压制该选项，低概率选项（reply）会雪崩，方向惩罚不可用。**
+- **结论**：5 个 post-v8 角度全败（v9/v10/v11/E2a/E3），无一超 v8 56.4。reply↔tool 边界是所有版本共同死穴，现有"20+ 工具+reply 同空间+标量奖励"表示表达不出该边界。**奖励 / 参考分布线走死**。
+- **下一步（待用户定）**：A = 结构性突破（扩 eval 842→2-3k + 两阶段分解 先判"行动 or reply"→再判"哪个工具"）；B = 收手 v8 转系统层（路由+校准+集成）。详见 grpo 文档 §14。
