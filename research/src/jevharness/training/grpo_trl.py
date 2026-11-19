@@ -53,7 +53,7 @@ import torch
 
 from .data import SYSTEM, permuted, read_jsonl, render  # noqa: F401  (SYSTEM re-exported for docs)
 
-REWARDS = ("correct", "format", "soft", "qvalue")
+REWARDS = ("correct", "format", "soft", "qvalue", "reply_bound")
 
 
 # ------------------------------------------------------------------ data
@@ -100,9 +100,11 @@ def build_rows(examples: list[dict[str, Any]], tok: Any, n_permutations: int = 1
             qv = ex.get("q_values") or {}
             q = [float(qv[ex["options"][j]]) if qv.get(ex["options"][j]) is not None else float("nan")
                  for j in idx] if qv else []
+            # index (in permuted order) of the reply_without_tool option, or -1 if absent (for the reply_bound reward)
+            reply_idx = next((j for j in range(n) if ex["options"][idx[j]].split(" -- ")[0].strip() == "reply_without_tool"), -1)
             rows.append({"prompt": text, "user_prompt": user, "n_options": n,
                          "gold": int(max(range(n), key=lambda k: tgt[k])), "target": tgt, "q": q,
-                         "id": str(ex.get("id", len(rows)))})
+                         "reply_idx": reply_idx, "id": str(ex.get("id", len(rows)))})
     return rows
 
 
@@ -150,7 +152,22 @@ def make_reward_funcs(tok: Any, names: list[str], strict_eos: bool = False) -> l
                 out.append(float(qq[k]))
         return out
 
-    table = {"correct": correct, "format": format_, "soft": soft, "qvalue": qvalue}
+    def reply_bound(completion_ids: list[list[int]], n_options: list[int], gold: list[int],
+                    reply_idx: list[int], **_: Any) -> list[float]:
+        out: list[float] = []
+        for c, n, g, ri in zip(completion_ids, n_options, gold, reply_idx):
+            k = pick(c, n)
+            if k is None:
+                out.append(0.0)
+            elif k == g:
+                out.append(1.0)
+            elif ri >= 0 and ((k == ri) != (g == ri)):
+                out.append(-1.0)
+            else:
+                out.append(0.0)
+        return out
+
+    table = {"correct": correct, "format": format_, "soft": soft, "qvalue": qvalue, "reply_bound": reply_bound}
     funcs = []
     for n in names:
         if n not in table:
@@ -171,6 +188,16 @@ def option_reward(names: list[str], weights: list[float], row: dict[str, Any], k
             r += w * float(row["target"][k])
         elif n == "qvalue" and row["q"] and not math.isnan(row["q"][k]):
             r += w * float(row["q"][k])
+        elif n == "reply_bound":
+            # E3: subsumes `correct` (1.0 on the gold option) plus a -1.0 penalty for crossing the
+            # reply/tool boundary in EITHER direction (gold=reply->tool = over-action,
+            # gold=tool->reply = under-action). Other wrong options stay 0.0.
+            if k == row["gold"]:
+                r += w * 1.0
+            else:
+                ri = row.get("reply_idx", -1)
+                if ri >= 0 and ((k == ri) != (row["gold"] == ri)):
+                    r += w * -1.0
     return r
 
 
@@ -265,7 +292,7 @@ def train_trl(a: argparse.Namespace, rows: list[dict[str, Any]], names: list[str
     if tok(text=[probe])["input_ids"][0] != tok(probe, add_special_tokens=False).input_ids:
         print("[grpo_trl] WARNING: this tokenizer adds special tokens to raw text (e.g. a BOS), so TRL's prompt "
               "ids differ from the serve_jev/train_decision encoding")
-    ds = Dataset.from_list([{k: r[k] for k in ("prompt", "n_options", "gold", "target", "q", "id")} for r in rows])
+    ds = Dataset.from_list([{k: r[k] for k in ("prompt", "n_options", "gold", "target", "q", "id", "reply_idx")} for r in rows])
     args = GRPOConfig(
         output_dir=a.out, per_device_train_batch_size=a.batch_size, gradient_accumulation_steps=a.grad_accum,
         num_generations=a.num_generations, max_completion_length=a.max_completion_length,
