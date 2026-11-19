@@ -1212,3 +1212,31 @@ raw（未校准）：acc 51.19 / NLL 3.416 / Brier 0.405 / ECE 0.410 / mean_conf
 - 评测：`/tmp/eval_v11_{final,final_calibrated}.json`；日志 `/tmp/grpo_train_v11.log`、`/tmp/v11_watch.log`
 - 部署前提（若采纳 schema）：生产 render 同步改 `option_text(label, desc)` + 重校准，两侧原子改；且须先解决"过度动作"偏置（见 E3 方向修正）。
 - 挖矿：`checkpoints/mine_boundary_v9/queue.jsonl`（397 行）
+
+## 26. E2a：KL 锚弱化（β 0.05→0.01）——E2 被否（2026-11-19）
+
+### 26.1 假设与配方
+- 假设（E2 之弱锚变体）：v11 的 KL 锚（reference=AgentDecision-4B 裸名基线）带"欠动作"倾向、且格式错位，可能拖累 schema 适应；**弱化锚（β 0.05→0.01）应让 policy 更自由适应 name--desc、改善 reply 过度动作**。
+- 配方：v11 同配方**只改 β 0.05→0.01**（init/train/dev/seed 全同），out `grpo_train_v11_e2a`，442 步 1 epoch。
+
+### 26.2 结果（dev 842，name--desc）
+- **总 acc 49.53% < v11 51.19%（−1.66pp，更差）**。NLL(cal) 1.778（v11 1.725）、calibration global **3.264**（v11 3.079）。
+- 逐工具：**唯一大幅变化是 reply 31.5%→19.4%（−12.1pp，过度动作加剧）**（reply→read 55 + edit 44，比 v11 的 50/34 更多）；read 69.4(+1.5)、bash 45.2(+4.7)、write 27.8(+5.6)；edit/shell/webfetch/compress/grep/glob/done **≈持平**。
+- in-train dev 峰 0.4988（step 285）、final 0.4953；KL 末期 3.13（> v11 ~2.1，弱锚下 policy 发散更大）。
+
+### 26.3 结论：E2 REJECTED（非瓶颈，弱锚反放大过度动作）
+1. **弱锚假设被否**：β 0.05→0.01 没改善 schema 适应、总 acc 反降、reply 过度动作反加剧。
+2. **KL 锚不是过度动作根因**，它带欠动作倾向、反而是"过度动作"的**部分刹车**（弱化它 → 失去抑制 → reply 崩得更狠）。
+3. **过度动作根源 = schema 描述让 action 工具太抢手 + `correct` 二元奖励不罚跨边界错** → **E3（方向性惩罚 `reply_bound`）才是对症解法**（§27）。
+- 产物：`checkpoints/grpo_train_v11_e2a`、`/tmp/eval_v11_e2a_{final,final_calibrated}.json`、日志 `/tmp/grpo_train_v11_e2a.log`。
+
+## 27. E3：方向性惩罚 `reply_bound`（针对过度/欠动作）（2026-11-19，进行中）
+
+### 27.1 动机
+- v11（schema）主误差 = **过度动作**（gold=reply→选 tool，reply 31.5% 崩到 19.4% 于 E2a）；裸名主误差 = **欠动作**（gold=tool→选 reply）。E3 用一个**双向罚 reply↔tool 边界错配**的奖励，直接对症。
+- **实现**（`grpo_trl.py`，`--impl torch`，`--rewards reply_bound` 自包含替代 correct）：`k==gold→1.0`；`跨 reply/tool 边界（XOR）→−1.0`；同侧错→0.0。`reply_idx`（permuted 顺序里 reply_without_tool 选项索引）在 build_rows 预计算、作列传入。**本地 py_compile + 逻辑单测全过**（correct→1/过度→−1/欠动作→−1/同侧错→0/无 reply 退化 correct）。
+- 配方：v11 同配方 + `--rewards reply_bound` + **β 保持 0.05**（不叠加 E2），out `grpo_train_v11_e3`，442 步 1 epoch。
+
+### 27.2 结果
+- 训练中（PID 525898，watcher 自动 calibrate→eval raw+calibrated）。判读目标：**reply 是否从 19-31% 抬回 + acc 是否超 v11 51.19 / 逼近 v8 56.41**。
+- （待训完填充）
