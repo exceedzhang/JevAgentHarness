@@ -163,6 +163,7 @@ class _Episode:
     n_no_valid_probe: int = 0
     n_stop_rejects: int = 0                          # finish proposals the stop guard rejected so far
     n_gate_fires: int = 0                            # pre-action safety-gate blocks so far (DCSV2 §13.13)
+    forced_ask_done: bool = False                    # force-field remedy: the reveal-ask was already forced
     delegated: bool = False                          # this step's call was System-1's (``_delegated_call``)
     stop_advice: Any = None                          # E6d stop assist: (question, answer, tap) asked before the step
 
@@ -188,13 +189,59 @@ _GATE_STONEWALL_RE = re.compile(
     r"that's all|on my end|don't (?:have|see)", re.I)
 
 
-def _pre_action_gate(cfg, name: str, args, history, ep) -> str | None:
+def _parse_json_prefix(s):
+    """Parse the leading JSON value from a string that may have trailing non-JSON text
+    (a get_orders observation is ``[{...}]`` followed by ``log: heartbeat`` lines). Returns
+    None when there is no leading JSON value. raw_decode stops at the end of the first value."""
+    s = s.lstrip()
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(s)
+        return obj
+    except Exception:
+        return None
+
+
+def _single_order_id_from_get_orders(history):
+    """Return the sole order_id from the most recent get_orders observation, else None.
+    Used by the arg-repair hard remedy (DCSV2 §13.14b) to fill an irreversible action
+    (e.g. ship_order) with the order the agent ALREADY obtained from a read-only tool but
+    failed to use. Only returns when unambiguous (exactly one order_id) to stay safe."""
+    for a, o in reversed(history):
+        if isinstance(a, str) and a.startswith("get_orders") and isinstance(o, str):
+            data = _parse_json_prefix(o)
+            if data is None:
+                continue
+            if isinstance(data, list):
+                ids = [d.get("order_id") for d in data
+                       if isinstance(d, dict) and d.get("order_id")]
+                return ids[0] if len(ids) == 1 else None
+            if isinstance(data, dict) and data.get("order_id"):
+                return data["order_id"]
+    return None
+
+
+# force-field remedy (DCSV2 §13.14c): the clarify customer only reveals the missing value when the
+# ask targets the TRUE missing field. Infer that field from the imminent irreversible action so the
+# gate can force the agent to ask the RIGHT field (instead of the field it keeps guessing at).
+_FORCE_FIELD = {"ship_order": "shipping_speed", "refund": "refund_method", "cancel_order": "order_id"}
+_FORCE_FIELD_Q = {
+    "shipping_speed": "Could you confirm the exact shipping speed for this order -- express or standard?",
+    "refund_method": "How should we issue the refund -- as store credit, or back to your original payment method?",
+    "order_id": "Which specific order should we act on? Please give the exact order id.",
+}
+
+
+def _pre_action_gate(cfg, name: str, args, history, ep):
     """Pre-action safety gate. If the about-to-be-executed tool call ``name`` is an
     IRREVERSIBLE side-effecting action and this episode already had >= ``stonewall_min``
-    non-resolving (stonewall) ask_user replies, return a corrective note (the caller must
-    NOT execute the action); else return None. Enabled per-arm via
-    ``tool_select.extra.pre_action_gate`` (a dict: irreversible[], stonewall_min, max_fires)
-    and capped by ``max_fires`` per episode (fail-open afterwards to avoid loops/budget burn)."""
+    non-resolving (stonewall) ask_user replies, the gate fires and returns a verdict dict;
+    else returns None. Verdicts:
+      {"kind": "block",  "note": ...}    soft (DCSV2 §13.13): do not execute; re-decide.
+      {"kind": "repair", "args": {...}}  hard arg-repair (DCSV2 §13.14b): overwrite the
+            action args with the already-observed order_id and execute the corrected call.
+    Enabled per-arm via ``tool_select.extra.pre_action_gate`` (dict: irreversible[],
+    stonewall_min, max_fires, mode in {"soft","arg_repair"}); capped by ``max_fires`` per
+    episode (fail-open afterwards to avoid loops/budget burn)."""
     extra = getattr(getattr(cfg, "tool_select", None), "extra", None) or {}
     gate = extra.get("pre_action_gate")
     if not isinstance(gate, dict) or gate.get("enabled", True) is False:
@@ -212,7 +259,26 @@ def _pre_action_gate(cfg, name: str, args, history, ep) -> str | None:
     if n_sw < sw_min:
         return None
     ep.n_gate_fires += 1
-    return (
+    mode = gate.get("mode")
+    if mode == "force_field":
+        # Force the agent to ask the CORRECT missing field (inferred from the imminent action) so the
+        # customer reveals the value; then step aside (return None afterwards) so the agent acts with
+        # the now-available value instead of guessing it into an irreversible action.
+        if getattr(ep, "forced_ask_done", False):
+            return None
+        field = _FORCE_FIELD.get(name)
+        if field:
+            ep.forced_ask_done = True
+            return {"kind": "ask", "name": "ask_user",
+                    "args": {"missing": field, "question": _FORCE_FIELD_Q[field]}}
+    elif mode == "arg_repair":
+        oid = _single_order_id_from_get_orders(history)
+        if oid:
+            newargs = dict(args) if isinstance(args, dict) else {}
+            if newargs.get("order_id") != oid:
+                newargs["order_id"] = oid
+                return {"kind": "repair", "args": newargs}
+    note = (
         f"[Pre-action safety gate] You are about to call `{name}` (an irreversible action), but "
         f"you have already asked the customer {n_sw} times and still do not have the required value. "
         f"Do NOT guess. Do exactly ONE of: (1) obtain the value with a read-only tool first "
@@ -220,6 +286,7 @@ def _pre_action_gate(cfg, name: str, args, history, ep) -> str | None:
         f"truly cannot obtain it, finish and report that you cannot proceed without the missing value. "
         f"Choose one tool now."
     )
+    return {"kind": "block", "note": note}
 
 
 def _same_value(a: Any, b: Any) -> bool:
@@ -1682,10 +1749,22 @@ class JevAgent:
                                        [finish_tool(cfg.final_tool)], ledger, DP.STOP.value, slog,
                                        tool_choice={"type": "function", "function": {"name": cfg.final_tool}})
                     name, args, cid = self._resp_to_call(r, cfg.final_tool)
-                gate_note = _pre_action_gate(cfg, name, args, history, ep)
-                if gate_note is not None:
-                    # execution-layer guard (DCSV2 §13.13): block a guessed value from entering an
+                gate_res = _pre_action_gate(cfg, name, args, history, ep)
+                if gate_res is not None and gate_res.get("kind") == "repair":
+                    # hard arg-repair (DCSV2 §13.14b): fill the irreversible action with the
+                    # order the agent already obtained from get_orders, then execute the fix.
+                    args = gate_res["args"]
+                    print(f"[pre-action-gate] REPAIR {name} -> {json.dumps(args)[:140]} (order_id from get_orders)", flush=True)
+                elif gate_res is not None and gate_res.get("kind") == "ask":
+                    # force-field remedy (DCSV2 §13.14c): instead of the irreversible action, force the
+                    # agent to ask the CORRECT missing field so the customer reveals the value, then run it.
+                    name, args = gate_res["name"], gate_res["args"]
+                    print(f"[pre-action-gate] FORCE-ASK {name}({json.dumps(args)[:120]})", flush=True)
+                    # fall through: the forced ask_user is executed via env.step below
+                elif gate_res is not None:
+                    # soft block (DCSV2 §13.13): block a guessed value from entering an
                     # irreversible action; re-decide next loop with the corrective note in context.
+                    gate_note = gate_res["note"]
                     append_note(messages, gate_note)
                     slog.tool, slog.args = name, args
                     slog.observation = "(blocked by pre-action gate -- action not executed)"

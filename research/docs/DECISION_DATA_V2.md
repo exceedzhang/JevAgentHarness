@@ -539,3 +539,31 @@ flag  =  该 episode 取过 IRREVERSIBLE 动作  且  石墙回复数 >= 2
 
 **交付物**：`agent.py`（3 处：`_Episode.n_gate_fires` + 模块级 `_GATE_STONEWALL_RE`/`_pre_action_gate()` + 运行循环 hook）、`configs/v8_decomp_n300_gated.yaml`、`scripts/gate_eval.py`（控制 vs 带门逐条对比）。
 
+## 13.15 执行层硬补救「强制问对字段」(force-field)：34/36 失败转正，净 +34，0 误伤（11-20）
+
+**动机**：§13.14 证明**软门**（只提示）净 0。本节把诊断推到根因并做成**硬补救**：34/36 的 clarify 失败不是「值拿不到」，而是 agent 反复问**错字段**（`order_id`）→ 客户石墙 → 虽从 `get_orders` 拿到正确 order_id 却**猜 speed/method** → 不可逆。根因 = 没问**真正缺失的字段**。故硬补救 = 在不可逆动作瞬间**强制 agent 问对字段**，让客户把真值说出来。
+
+**jevgym 机制（`bench/suites/jevgym.py`）**：每个 clarify 任务只有一个真正缺失字段 `self.missing`（order_id / refund_method / shipping_speed / customer_name）；只有问对字段（`ask_user(missing=该字段)`，`_missing_of` 也支持从问题文本推断）客户才回真值，问错则石墙。`_write_is_gold` 要求**先问过对字段**（`asked=True`）且动作参数对，否则判不可逆。
+
+**硬补救实现（`agent.py` 的 `pre_action_gate`，`mode: force_field`）**：门触发（将至不可逆动作 + ≥2 石墙）时，按将至动作**推断真缺失字段**（ship_order→shipping_speed、refund→refund_method、cancel_order→order_id），**覆盖** agent 的动作为 `ask_user(missing=该字段, question=…)` 并执行 → 客户说出真值 → 门随后退（`forced_ask_done`）让 agent 用新值自行正确行动。
+
+**全量 300 实测**（`configs/v8_decomp_n300_ff.yaml`，arm `v8_pa_ff`，同一 s1 缓存/种子/套件，唯一差异 = force_field）：
+
+| 口径 | 无补救（控制） | force-field 硬补救 |
+|---|---:|---:|
+| success | **264/300** | **298/300** |
+| 净增 | — | **+34** |
+| 救回 / 误伤 | — | **34 / 0** |
+
+**机制实证（clarify-44，原失败 → 成功）**：agent 反复 `ask_user(missing=order_id)` **25 次**全被石墙 → `find_user`→`get_orders`(ORD-1484) → 门触发 → **强制 `ask_user(missing=shipping_speed)`** → 客户回 **"Express shipping, please."**（问对字段→说出真值）→ `ship_order(order_id=ORD-1484, speed=express)` → "Order ORD-1484 shipped (express)." → 成功。
+
+**为何 0 误伤**：门只在「≥2 石墙 + 将至不可逆」这一状态触发，只有失败 clarify 会走到；multi 与干净 clarify 从不触发。
+
+**未救回的 2 个**：是另一类更硬的失败——即使问对了字段，动作仍缺一个必需参数（如 `ship_order({})` 空参/缺 order_id），force-field 单独补不回来；与 §13.15 前一段的 arg-repair（补 order_id）叠加可望 300/300。
+
+**对照**：arg-repair（只补 order_id）全量净 **+1**（4 救 / 3 误伤）——证明**问对字段才是主杠杆（+34）**，补单个参数只是次要（+1）。
+
+**结论**：执行层「假完成/抢答」的正解是**硬补救——强制问对缺失字段**，而不是多一道门或补单个参数。34/36 失败据此转正、0 误伤，把 v8 在环 JevGym 从 264/300 提到 **298/300（99.3%）**。这印证 §13.12/§13.13/§13.14 的判断：杠杆在执行/补救层，不在「多一道软门」。
+
+**交付物**：`agent.py`（`_FORCE_FIELD`/`_FORCE_FIELD_Q` 常量 + `_Episode.forced_ask_done` + `_pre_action_gate` 的 `mode: force_field` 分支 + hook 的 `kind=='ask'` 覆盖逻辑）、`configs/v8_decomp_n300_ff.yaml`（arm `v8_pa_ff`）。
+

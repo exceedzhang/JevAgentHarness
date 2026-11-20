@@ -1,0 +1,56 @@
+# v8 in-loop 假完成 gate — HARD force-field arm (DCSV2 §13.14c).
+# Identical to the arg-repair config EXCEPT pre_action_gate.mode: force_field, which on gate
+# fire overrides the irreversible action with ask_user(missing=<inferred field>) so the clarify
+# customer reveals the TRUE missing value (ship_order->shipping_speed, refund->refund_method,
+# cancel_order->order_id); then the gate steps aside so the agent acts with the revealed value.
+# Same s1_cache / suite as the control so the effect isolates to the gate.
+name: v8_failure_decomp_pa_ff
+suite:
+  name: jevgym
+  n: 300
+  seed0: 42
+  families: v2
+  distractor_style: near
+  n_distractors: 12
+  noise_lines: 20
+  strict: true
+n_tasks: 300
+small_llm:
+  provider: openai
+  model: Qwen/Qwen3.8-27B
+  base_url: http://127.0.0.1:8000/v1
+  api_key: sk-1234
+  temperature: 0
+llm:
+  provider: openai
+  model: Qwen/Qwen3.8-27B
+  base_url: http://127.0.0.1:8000/v1
+  api_key: sk-1234
+  temperature: 0
+s1_cache: cache/s1_v8_decomp_pa.sqlite
+s1_backends:
+  v8:
+    type: jev
+    name: AgentDecision-4B
+    base_url: http://127.0.0.1:8000
+    model: AgentDecision-4B
+    api_key: sk-1234
+    price_model: AgentDecision-4B
+    timeout: 60.0
+workers: 2
+arms:
+- name: v8_pa_ff
+  s1: v8
+  tool_select:
+    mode: replace
+    extra:
+      pre_action_gate:
+        enabled: true
+        mode: force_field
+        irreversible: [cancel_order, refund, ship_order]
+        stonewall_min: 2
+        max_fires: 3
+  routing:
+    mode: replace
+  finish:
+    mode: replace
