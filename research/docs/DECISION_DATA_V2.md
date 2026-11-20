@@ -434,3 +434,50 @@ n≥13 的净对错加总 = **−10+10−3−1−1+1+1+1+1+3+2 = +4**，正好�
 
 **意义（决策模型线正式关闭）**：v13 是 v12 之后**最后一个、也是最"正统"的一种** in-domain 收束（不是数据/schema/结构，而是**约束优化**这一最 principled 的改法）。它证明：post-v8 的失败**不是"目标函数没约束好"**——连加约束优化也走不动，因为瓶颈是**数据上已无梯度 + v8 已局部最优**，不是目标设计问题。**v3-v12 + Tier-2(v13) 全试遍，决策模型（工具选择）这条线彻底关闭**。真正的杠杆在执行/规划层（§13.8：无进展循环检测、假复现检测、验证即提交、routing 降级），不在单步工具选择。
 
+## 13.12 reply↔tool 边界有效性检验：56% 天花板里有多少是**度量伪影**（11-20）
+
+**动机**：用户提出一个此前没验过的角度——「有没有可能 reply 和 tool 在某些场景**都可以**，而不是二元关系？」即 gold 是**参考选择**，不是唯一最优。若成立，则硬 0/1 label-match 会把「合法的非参考动作」也算错，**56% 天花板有一部分是度量伪影**，v8 的真实「做出了合理选择」率 > 56%。这也正好解释了 §13.11 / v10 的 reply↔tool 死区：把硬 0/1 标签套在模糊边界上 → 假错误 + 矛盾信号 → GRPO 放弃边界（zstd→1.0）。
+
+**方法（不采样，全量判）**：
+- **样本**：v8 在 dev(n=842) 上复现其混淆矩阵（argmax，calibration=温度不改 argmax，`/tmp/v8_dev_percase.jsonl`），取「gold、pred 恰有一个是 `reply_without_tool`」的边界点——**正好 193 个**，与混淆矩阵逐格对齐（gold=reply→pred=tool **51** 个；gold=tool→pred=reply **142** 个）。每个点带完整 `state`（TASK + STEPS SO FAR 及结果）。
+- **判官**：27B（`Qwen/Qwen3.8-27B`，vllm :8000，temp 0，`enable_thinking=False`）。判据是**纯有效性**（不是「哪个更好」「是不是 gold」）：*给定此情境，agent 实际所选的这个动作是否是一个合理、站得住、不自我矛盾的选择？* 输出 VALID / INVALID / UNCERTAIN + 一行理由。
+- **脚本**：`extract_boundary.py`（v8 逐点 pred → 边界集）、`judge_boundary.py`（27B 判有效性）。产物 `/tmp/boundary_cases.jsonl`、`/tmp/boundary_judge.jsonl`、`/tmp/boundary_judge_summary.json`。
+
+**结果（方向不对称，这是关键）**：
+
+| 方向 | n | VALID | INVALID | UNCERTAIN |
+|---|---:|---:|---:|---:|
+| **reply→tool**（模型调了工具，gold 是 reply） | 51 | **90.2%** (46) | 9.8% (5) | 0 |
+| **tool→reply**（模型 reply，gold 要调工具） | 142 | 36.6% (52) | 62.7% (89) | 1 |
+| 合计 | 193 | 50.8% (98) | 48.7% (94) | 1 |
+
+**逐格（gold→pred 或 pred→gold，valid% = 被判 VALID 的比例）**：
+
+| 方向 / 工具 | n | valid% | 方向 / 工具 | n | valid% |
+|---|---:|---:|---|---:|---:|
+| reply→**read** | 20 | 100 | tool→**read** | 37 | 24 |
+| reply→**shell** | 13 | 92 | tool→**shell** | 24 | 33 |
+| reply→**edit** | 10 | 70 | tool→**edit** | 18 | 33 |
+| reply→**bash** | 4 | 100 | tool→**glob** | 12 | 17 |
+| reply→其余(web/qdocs/grep) | 3 | 100 | tool→**webfetch** | 8 | 50 |
+| reply→ask_user_question | 1 | 0 | tool→**compress** | 8 | **88** |
+| | | | tool→shell_run | 6 | 33 |
+| | | | tool→grep | 6 | 33 |
+| | | | tool→**bash** | 5 | 0 |
+| | | | tool→其余(context7/question/web) | 14 | 64–100 |
+
+**人工抽检（18 例分层）→ 判官可信**：
+- reply→tool **VALID** 的典型：agent 还在读/比对中途，再多 read/shell 一步完全站得住（gold 在那一刻选择 reply，但再读一步不矛盾）。
+- reply→tool **INVALID** 的典型：重复编辑、编辑到错的文件（改 `2026-11-08.md` 而非目标论文）、或该直接答却 ask_user。
+- tool→reply **VALID** 的典型：**活已经干完了**——edit 已成功、文件已读完、任务已 marked done——此时 reply「完成」是合理的，反而 gold 要求「再 edit/read」是多余的。
+- tool→reply **INVALID** 的典型：**抢答 / 假完成**——用户明确要求下载缺失图片（应 shell）、要求分析差异（应 read 全文），模型却直接 reply。这正是 §13.8 的「verify-then-commit / 假完成」失效模式。
+
+**量化：天花板里约 11.6pp 是度量伪影（上界）**：193 个边界点**全部**在 gold-match 里算错；其中 **98 个被判 VALID**。若把「合法的非参考动作」也算可接受，则 v8 的「合理动作率」≈ (475+98)/842 = **68.1%**（**上界**，因为合法≠最优，部分只是多走一步）。真实值在 56.4%–68.1% 之间。也就是说 **56% 这个数字确实系统性低估了 v8 的「做出合理选择」能力，低估幅度至多约 11.6pp**。
+
+**裁决（有信息量，且方向明确）**：
+1. **天花板确有度量伪影，但不对称**：模型「多调工具」（reply→tool，51 个）**90% 合法**——几乎全是假错误，多读/多验一步不是问题，硬标签却罚它。模型「抢答」（tool→reply，142 个）只有 37% 合法，**63% 是真错**（该读/该跑/该下载却直接 reply）。
+2. **真问题集中在「抢答 / 假完成」**（142 里 89 个真 invalid，占全量 89/842≈10.6pp 真实损失），而这**不是决策模型能靠更多 GRPO 修的**——它是**执行层**的「没干完就宣布完成」，正是 §13.8 的 verify-then-commit / 假复现检测要解决的。
+3. **对决策模型线的意义**：**不重开 GRPO**。此检验反而**加固**了 §13.11 的结论——post-v8 走不动的根因是数据上零梯度 + 瓶颈在执行层；它还**修正了指标的解读**：56% 不该被当作「模型只有 56% 会做对」，而是「参考命中 56%，合理动作 ≥56%（至多 68%）」。**若将来要重估决策模型，正确指标是「有效性/结果奖励」而非 label-match**（且 reply↔tool 应**非对称**：多调工具不罚、抢答重罚）；但**当前杠杆仍在执行/规划层**（§13.8），因为 63% 的真错恰好落在那里。
+
+**复现**：`data/train_v4/dev.jsonl`；v8 = `checkpoints/grpo_train_v8`；判官 27B = vllm :8000（`sk-1234`）。脚本 `/tmp/extract_boundary.py` / `/tmp/judge_boundary.py`（可迁入 `research/src/jevharness/training/` 作为 `boundary_validity.py`）。
+
