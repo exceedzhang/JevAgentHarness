@@ -569,3 +569,58 @@ flag  =  该 episode 取过 IRREVERSIBLE 动作  且  石墙回复数 >= 2
 
 **补充（剩余 2 个 + 叠加 arg-repair）**：未救回的 2 个是 `clarify-98`/`clarify-338`（**0 次提问即抢答 refund**，离线检测器 §13.13 的 2 个漏报）——门需 `≥2 石墙` 才触发，它们无石墙故门不触发，是另一类更难的「无澄清即抢答」模式（需不同的触发条件）。在 force-field 之上叠加 arg-repair（补 order_id）全量仍 **298/300**（对这两类无效，它们并非缺 order_id）。
 
+## 13.16 决策模型已到上限：软奖励 / 结果奖励的三次实验（统一阴性结论）
+
+**背景**：§13.4–13.11 的 per-step GRPO（v3–v13）在 56% gold-match 停滞，根因是 `frac_zero_std_groups≈1.0`（组内零方差 → 无梯度）的"墙"。§13.12 边界有效性检验证明 56% 部分是度量假象（reply→tool 90.2% 有效；tool→reply 62.7% 真错 = 假完成，§13.15 已修）。据此提出"判有效性不判标签匹配"的奖励重构，验证三条路线：①软/合理替代集奖励；②结果奖励（轨迹成功）。本节记录①和②的实测（③判官标注未做）。
+
+### 13.16.1 实验一：valid_alt 软奖励（Option 1）——破墙，但不提升
+
+**实现**（`grpo_trl.py`）：新增 `valid_alt` 奖励——gold 选项→1.0；其余按选项类型分级：只读工具（`_READONLY_TOOLS`：read/grep/glob/shell/webfetch/…）→0.4、reply_without_tool→0.1、状态变更→0.05。每一行都给分级值（非仅 reply-gold），按 §13.12 的非对称性（无害探索 > 抢答 > 冒险动作）。
+
+**配置**：v8 init（`checkpoints/grpo_train_v8`）+ train_v10（3536），`--rewards valid_alt`，20–55 步，GPU1。
+
+**结果**：
+
+| 指标 | valid_alt（软） | 对照 correct（0/1） |
+|---|---:|---:|
+| `frac_zero_std_groups` 均值 | **0.6534**（范围 0.5–0.875） | ~1.0（v3–v13 墙） |
+| dev gold-match | **持平 ~0.56**（最佳 0.5641 = v8） | 0.5641 |
+
+**结论**：`frac_zero_std_groups` 从 ~1.0 稳定降到 ~0.65 → **墙被可持续打破**。机制：0/1 奖励在"16 条采样全错但选了不同选项"的组里全给 0 → 零方差；分级奖励给不同错误选项不同值 → 组内方差 → 真梯度。但 dev gold-match 持平（最佳 = v8）——valid_alt 优化"有效性"而非"标签匹配"，故不涨。**软奖励是必要非充分**：能给梯度（破墙），但目标须与真实目标对齐才能提升。
+
+### 13.16.2 实验二：结果奖励 GRPO（Option 3，recipe R8）——阴性
+
+**实现**：既有 recipe R8（`grpo_online.py`）——in-process 可训练 `TorchDecider`（v8+LoRA）作为 JevGym 环内 s1；轨迹成功奖励（`gated`）；同任务 `group_size=16` 条 rollouts 的组内 advantage；PPO-clipped + KL 的 GRPO 更新。
+
+**配置**（`configs/train/grpo_online_v8o.yaml`）：jevgym n:256 seed0 10000（v2, near, n_distractors 12, strict）；eval_suite seed0 5000 n:64；group_size 16；iterations 12；lr 1e-5；reward gated（lambda_gate 0.5, cost_scale 10）；executor + small_executor 均 27B。约 2 小时跑完。
+
+**结果（held-out eval，64 任务）**：
+
+| iter | eval 成功率 | eval reward | dec_acc | irreversible |
+|---|---:|---:|---:|---:|
+| 0（v8 基线） | **89.1%**（57/64） | 0.523 | 0.965 | 9.4% |
+| 5 | 89.1% | 0.520 | 0.956 | 10.9% |
+| 10 | **93.75%**（60/64） | 0.563 | 0.967 | 6.25% |
+| 12（最终） | **89.1%**（57/64） | 0.520 | 0.956 | 10.9% |
+
+训练侧（256 任务 rollouts）：success 0.77–1.0、reward 0.39–0.66、dec_acc 0.89–0.999 全抖动无趋势；iter 4 触发 `no decision carries a learning signal (zero-variance groups: 1.00)`——16 条同任务轨迹全成功 → 组内零方差 → 无信号。
+
+**裁决**：v8 在环成功已达 **89.1%**，R8 **没有可持续提升**——最终 89.1% = 基线；iter 10 的 93.75% 在 64 任务（±3 任务 = ±4.7pp）下属噪声波动。训练侧全噪声 + 零方差警告共同说明：**v8 接近上限，组内方差太小，GRPO 无信号**。
+
+### 13.16.3 统一结论：决策模型已到上限
+
+三次独立奖励路线（per-step 0/1、per-step 软奖励、轨迹结果奖励）指向同一本质：
+
+1. **墙不是奖励结构问题**（三种都试过，墙在轨迹层面照样再现）。
+2. **墙是 v8 在该决策/任务域上已接近最优**：在环成功 89–93%，16 条同任务轨迹大多收敛到相同结果 → 组内方差小 → GRPO 无梯度。
+3. **56% per-step gold-match 是度量假象**（§13.12：有效性 > 标签匹配），不是可修复的弱点。
+4. **真正的杠杆是执行层**（force-field 门：264→298，§13.15，已完成）——那 12% 差距是**确定性修复**（问对字段），非 GRPO 可学的策略。
+
+**即：在这个数据/任务域上，GRPO（任何奖励）无法再提升 v8——它已接近上限。** 要再前进，需要**更难的数据**（让 v8 有更多失败/组内方差）或换任务/模型。
+
+### 13.16.4 交付物
+
+- `research/src/jevharness/training/grpo_trl.py`：新增 `valid_alt` 奖励（`_READONLY_TOOLS` + `option_reward` 的 `valid_alt` 分支 + row/Dataset 携带 `options`）。
+- `research/configs/train/grpo_online_v8o.yaml`：结果奖励 GRPO 配置（recipe R8）。
+- 复现：软奖励 `PYTHONPATH=src .venv/bin/python -m jevharness.training.grpo_trl --impl torch --model <Qwen3-4B> --init checkpoints/grpo_train_v8 --train data/train_v10/train_hard_weighted_v10.jsonl --dev data/train_v4/dev.jsonl --out checkpoints/grpo_train_v14a --rewards valid_alt …`；结果奖励 `… -m jevharness.training.grpo_online --config configs/train/grpo_online_v8o.yaml --set model=<Qwen3-4B>`。
+

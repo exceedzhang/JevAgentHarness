@@ -1,0 +1,68 @@
+# Option 3 (user-approved) -- OUTCOME-REWARD GRPO of the System-1 decision model INSIDE the JevGym loop.
+# Recipe R8 (grpo_online.py), already implemented: in-process updatable TorchDecider (HF+LoRA, v8 init)
+# as s1; 16 same-task rollouts per task (group_size) with temperature sampling -> within-group reward
+# variance; reward = trajectory task-success (gated); GRPO policy-gradient over the per-decision buffer.
+#
+#   python -m jevharness.training.grpo_online --config configs/train/grpo_online_v8o.yaml [--set k=v ...]
+#
+# PROBE budget: 12 iters x 8 tasks x 16 rollouts = 1536 episodes (~30-45 min, GPU1 + 27B executor on :8000).
+# Watch: (1) within-group reward variance (the zstd analog -- does it stay < 1.0?), (2) eval success vs v8.
+name: grpo_online_v8o
+model: Qwen/Qwen3-4B
+init: checkpoints/grpo_train_v8     # v8 warm start (top-level LoRA adapter)
+ref: init                            # KL anchor = frozen copy of v8
+out: checkpoints/grpo_online_v8o
+lora: {r: 32, alpha: 64, dropout: 0.0, target_modules: all-linear}
+
+# clarify+multi (families v2) in the JevGym v2 style; v8 fails ~12% on clarify -> within-group success variance
+suite: {name: jevgym, n: 256, seed0: 10000, n_distractors: 12, distractor_style: near, families: v2, strict: true}
+eval_suite: {name: jevgym, n: 64, seed0: 5000, n_distractors: 12, distractor_style: near, families: v2, strict: true}
+
+# System-2 executor = the 27B worker (matches the v8 in-loop bench setup); small_executor (routing=replace
+# needs a small LLM; v8 in-loop had llm AND small_llm both = 27B, so routing was a no-op between two 27Bs)
+executor: {provider: openai, model: Qwen/Qwen3.8-27B, base_url: http://127.0.0.1:8000/v1, api_key: sk-1234, temperature: 0}
+small_executor: {provider: openai, model: Qwen/Qwen3.8-27B, base_url: http://127.0.0.1:8000/v1, api_key: sk-1234, temperature: 0}
+harness_defaults: {max_steps: 20}
+
+# single arm: the decider (v8) picks tool/routing/finish (REPLACE, like the v8 in-loop); the 27B fills args
+arms:
+  - {name: ts_replace, tool_select: {mode: replace}, routing: {mode: replace}, finish: {mode: replace}}
+
+decider:
+  temperature: 1.0            # rollout sampling temperature (gives the 16 rollouts per-task diversity)
+  max_len: 4096
+  batch_size: 16
+  max_wait_ms: 5.0
+  name: ours-v8o
+
+grpo:
+  iterations: 12
+  tasks_per_iter: 8
+  group_size: 16              # 16 same-task trajectories (the user's spec)
+  inner_epochs: 2
+  minibatch_size: 64
+  micro_batch_size: 8
+  clip_eps: 0.2
+  clip_eps_high: 0.28
+  kl_beta: 0.02
+  entropy_coef: 0.0
+  adv_scale: group
+  drop_zero_std_groups: true  # all-equal-reward (all-success or all-fail) groups carry no signal
+  drop_error_episodes: true
+  loss_agg: decision
+  gigpo: {enabled: false}     # keep simple for the probe
+
+reward:
+  kind: gated                 # R = 1[success] * (1 - lambda_gate * min(1, calls/cost_scale))
+  lambda_gate: 0.5
+  cost_unit: calls
+  cost_scale: 10.0
+  irreversible_penalty: 0.2   # strict JevGym: irreversible wrong call is worse than a benign failure
+
+optim: {lr: 1.0e-5, weight_decay: 0.0, grad_clip: 1.0, warmup_steps: 5}
+workers: 8
+eval_every: 5
+save_every: 5
+seed: 0
+gradient_checkpointing: true
+log_rollouts: false

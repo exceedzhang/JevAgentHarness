@@ -53,7 +53,7 @@ import torch
 
 from .data import SYSTEM, permuted, read_jsonl, render  # noqa: F401  (SYSTEM re-exported for docs)
 
-REWARDS = ("correct", "format", "soft", "qvalue", "reply_bound")
+REWARDS = ("correct", "format", "soft", "qvalue", "reply_bound", "valid_alt")
 
 
 # ------------------------------------------------------------------ data
@@ -104,7 +104,9 @@ def build_rows(examples: list[dict[str, Any]], tok: Any, n_permutations: int = 1
             reply_idx = next((j for j in range(n) if ex["options"][idx[j]].split(" -- ")[0].strip() == "reply_without_tool"), -1)
             rows.append({"prompt": text, "user_prompt": user, "n_options": n,
                          "gold": int(max(range(n), key=lambda k: tgt[k])), "target": tgt, "q": q,
-                         "reply_idx": reply_idx, "id": str(ex.get("id", len(rows)))})
+                         "reply_idx": reply_idx,
+                         "options": [ex["options"][idx[kk]].split(" -- ")[0].strip() for kk in range(n)],
+                         "id": str(ex.get("id", len(rows)))})
     return rows
 
 
@@ -178,6 +180,14 @@ def make_reward_funcs(tok: Any, names: list[str], strict_eos: bool = False) -> l
     return funcs
 
 
+# Read-only / harmless tools: a pick of one when the gold is reply is a VALID alternative (§13.12:
+# the agent is still gathering info, not "doing the wrong thing"), so it gets partial credit.
+_READONLY_TOOLS = {
+    "read", "read_file", "grep", "glob", "list", "search", "webfetch", "web_search",
+    "shell", "shell_run", "context7_resolve-library-id", "context7_query-docs",
+}
+
+
 def option_reward(names: list[str], weights: list[float], row: dict[str, Any], k: int) -> float:
     """Restricted-readout reward of option k (``--impl torch``: every sample is a valid option)."""
     r = 0.0
@@ -198,6 +208,24 @@ def option_reward(names: list[str], weights: list[float], row: dict[str, Any], k
                 ri = row.get("reply_idx", -1)
                 if ri >= 0 and ((k == ri) != (row["gold"] == ri)):
                     r += w * -1.0
+        elif n == "valid_alt":
+            # Option 1 (soft / valid-alternative reward). Full credit on the gold; graded partial
+            # credit on every other option BY ACTION TYPE so a diverse-but-wrong group still has
+            # non-zero reward variance (attacks the zstd~1.0 wall): read-only exploration 0.4,
+            # a reply (terminal action) 0.1, a state-changing tool 0.05. The graded values give a
+            # GRPO gradient where the 0/1 `correct` reward yields all-zero (zero variance) on
+            # diverse-but-wrong groups. Asymmetric per §13.12: harmless exploration > premature
+            # reply > risky action.
+            if k == row["gold"]:
+                r += w * 1.0
+            else:
+                nm = (row.get("options") or [None] * row["n_options"])[k]
+                if nm in _READONLY_TOOLS:
+                    r += w * 0.4
+                elif nm == "reply_without_tool":
+                    r += w * 0.1
+                else:
+                    r += w * 0.05
     return r
 
 
@@ -298,7 +326,7 @@ def train_trl(a: argparse.Namespace, rows: list[dict[str, Any]], names: list[str
     if tok(text=[probe])["input_ids"][0] != tok(probe, add_special_tokens=False).input_ids:
         print("[grpo_trl] WARNING: this tokenizer adds special tokens to raw text (e.g. a BOS), so TRL's prompt "
               "ids differ from the serve_jev/train_decision encoding")
-    ds = Dataset.from_list([{k: r[k] for k in ("prompt", "n_options", "gold", "target", "q", "id", "reply_idx")} for r in rows])
+    ds = Dataset.from_list([{k: r[k] for k in ("prompt", "n_options", "gold", "target", "q", "id", "reply_idx", "options")} for r in rows])
     args = GRPOConfig(
         output_dir=a.out, per_device_train_batch_size=a.batch_size, gradient_accumulation_steps=a.grad_accum,
         num_generations=a.num_generations, max_completion_length=a.max_completion_length,
