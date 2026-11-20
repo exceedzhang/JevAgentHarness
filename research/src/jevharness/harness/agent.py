@@ -265,6 +265,15 @@ def _pre_action_gate(cfg, name: str, args, history, ep):
         # customer reveals the value; then step aside (return None afterwards) so the agent acts with
         # the now-available value instead of guessing it into an irreversible action.
         if getattr(ep, "forced_ask_done", False):
+            # Already forced the ask; let the agent act with the now-available value.
+            # If the irreversible action still lacks order_id, inject the single get_orders
+            # order (arg-repair on top) so the action can complete.
+            oid = _single_order_id_from_get_orders(history)
+            a0 = args if isinstance(args, dict) else {}
+            if oid and a0.get("order_id") != oid:
+                na = dict(a0)
+                na["order_id"] = oid
+                return {"kind": "repair", "args": na}
             return None
         field = _FORCE_FIELD.get(name)
         if field:

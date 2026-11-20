@@ -567,3 +567,5 @@ flag  =  该 episode 取过 IRREVERSIBLE 动作  且  石墙回复数 >= 2
 
 **交付物**：`agent.py`（`_FORCE_FIELD`/`_FORCE_FIELD_Q` 常量 + `_Episode.forced_ask_done` + `_pre_action_gate` 的 `mode: force_field` 分支 + hook 的 `kind=='ask'` 覆盖逻辑）、`configs/v8_decomp_n300_ff.yaml`（arm `v8_pa_ff`）。
 
+**补充（剩余 2 个 + 叠加 arg-repair）**：未救回的 2 个是 `clarify-98`/`clarify-338`（**0 次提问即抢答 refund**，离线检测器 §13.13 的 2 个漏报）——门需 `≥2 石墙` 才触发，它们无石墙故门不触发，是另一类更难的「无澄清即抢答」模式（需不同的触发条件）。在 force-field 之上叠加 arg-repair（补 order_id）全量仍 **298/300**（对这两类无效，它们并非缺 order_id）。
+
