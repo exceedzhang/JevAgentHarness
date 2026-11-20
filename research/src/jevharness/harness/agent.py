@@ -162,6 +162,7 @@ class _Episode:
     probe_errors: list[str] = field(default_factory=list)
     n_no_valid_probe: int = 0
     n_stop_rejects: int = 0                          # finish proposals the stop guard rejected so far
+    n_gate_fires: int = 0                            # pre-action safety-gate blocks so far (DCSV2 §13.13)
     delegated: bool = False                          # this step's call was System-1's (``_delegated_call``)
     stop_advice: Any = None                          # E6d stop assist: (question, answer, tap) asked before the step
 
@@ -175,6 +176,50 @@ def _ep() -> _Episode:
 
 def _trunc(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n // 2] + "\n...[truncated]...\n" + s[-n // 2:]
+
+
+# Execution-layer "假完成 / 抢答" guard (DCSV2 §13.13). A "stonewall" is a short ask_user
+# reply that supplies NO usable value and pushes back -- the clarify-bench customer's
+# non-resolving reply. The gate fires when an IRREVERSIBLE action is about to run while
+# the episode already has >= stonewall_min such non-resolving asks (the agent is about to
+# guess an unobtainable value into an irreversible side-effecting action).
+_GATE_STONEWALL_RE = re.compile(
+    r"already (?:gave|told|said)|i think|no (?:further )?info|nothing (?:more|else)|"
+    r"that's all|on my end|don't (?:have|see)", re.I)
+
+
+def _pre_action_gate(cfg, name: str, args, history, ep) -> str | None:
+    """Pre-action safety gate. If the about-to-be-executed tool call ``name`` is an
+    IRREVERSIBLE side-effecting action and this episode already had >= ``stonewall_min``
+    non-resolving (stonewall) ask_user replies, return a corrective note (the caller must
+    NOT execute the action); else return None. Enabled per-arm via
+    ``tool_select.extra.pre_action_gate`` (a dict: irreversible[], stonewall_min, max_fires)
+    and capped by ``max_fires`` per episode (fail-open afterwards to avoid loops/budget burn)."""
+    extra = getattr(getattr(cfg, "tool_select", None), "extra", None) or {}
+    gate = extra.get("pre_action_gate")
+    if not isinstance(gate, dict) or gate.get("enabled", True) is False:
+        return None
+    irr = gate.get("irreversible") or ["cancel_order", "refund", "ship_order"]
+    if name not in irr:
+        return None
+    if ep.n_gate_fires >= int(gate.get("max_fires", 3)):
+        return None
+    sw_min = int(gate.get("stonewall_min", 2))
+    n_sw = sum(
+        1 for a, o in history
+        if isinstance(a, str) and a.startswith("ask_user")
+        and isinstance(o, str) and 0 < len(o.strip()) < 150 and _GATE_STONEWALL_RE.search(o))
+    if n_sw < sw_min:
+        return None
+    ep.n_gate_fires += 1
+    return (
+        f"[Pre-action safety gate] You are about to call `{name}` (an irreversible action), but "
+        f"you have already asked the customer {n_sw} times and still do not have the required value. "
+        f"Do NOT guess. Do exactly ONE of: (1) obtain the value with a read-only tool first "
+        f"(e.g. find_user, get_orders); (2) ask a more specific, different question; or (3) if you "
+        f"truly cannot obtain it, finish and report that you cannot proceed without the missing value. "
+        f"Choose one tool now."
+    )
 
 
 def _same_value(a: Any, b: Any) -> bool:
@@ -1637,6 +1682,16 @@ class JevAgent:
                                        [finish_tool(cfg.final_tool)], ledger, DP.STOP.value, slog,
                                        tool_choice={"type": "function", "function": {"name": cfg.final_tool}})
                     name, args, cid = self._resp_to_call(r, cfg.final_tool)
+                gate_note = _pre_action_gate(cfg, name, args, history, ep)
+                if gate_note is not None:
+                    # execution-layer guard (DCSV2 §13.13): block a guessed value from entering an
+                    # irreversible action; re-decide next loop with the corrective note in context.
+                    append_note(messages, gate_note)
+                    slog.tool, slog.args = name, args
+                    slog.observation = "(blocked by pre-action gate -- action not executed)"
+                    ep.prev = (v0, slog.observation)
+                    history.append((f"{name}({json.dumps(args)[:200]})", gate_note))
+                    continue
                 slog.tool, slog.args = name, args
                 if name == cfg.final_tool:
                     traj.final_answer = str(args.get("answer", ""))
