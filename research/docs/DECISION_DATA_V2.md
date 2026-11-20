@@ -481,3 +481,35 @@ n≥13 的净对错加总 = **−10+10−3−1−1+1+1+1+1+3+2 = +4**，正好�
 
 **复现**：`data/train_v4/dev.jsonl`；v8 = `checkpoints/grpo_train_v8`；判官 27B = vllm :8000（`sk-1234`）。脚本 `/tmp/extract_boundary.py` / `/tmp/judge_boundary.py`（可迁入 `research/src/jevharness/training/` 作为 `boundary_validity.py`）。
 
+### 13.13 执行层「假完成 / 抢答」检测器（在 v8 在环 trace 上，oracle-free）
+
+**动机**：§13.12 把 56% 天花板里**真实**的损失定位到「抢答 / 假完成」（63% 的 tool→reply 是 invalid），并指明它属执行层、非 GRPO 可修。本节在该方向上落地一个**可落地、oracle-free** 的在环检测器：当 agent 要把一个**从未被给出/确认**的值填进**不可逆**动作之前，拦下/提示它，而不是让它猜。
+
+**数据（真实）**：`results/v8_decomp_n300/v8_failure_decomp_pa/v8_pa.jsonl`，**300 条在环 episode**（150 clarify + 150 multi，JevGym v2 hard n_distractors=12，v8 决策 + 27B 执行）。**264 成功 / 36 失败；36 个失败全在 clarify 族**（clarify 114/150 成功），**multi 150/150 全对**。`result` 字段：成功含 `success/score/n_calls/optimal_calls/side_effects/n_asks`；失败额外含 `irreversible_error:true`（`irreversible_error:true` ⟺ 失败）。
+
+**失效机制（真·在环假完成）**：每个 clarify 任务的 system 都要求「缺/模糊的关键值（客户是谁、哪笔订单、退款方式、寄送速度）必须先 ask_user 确认，**不要猜**」。失败模式：agent 陷入**非解决的 ask 循环**（客户石墙，反复回 `Customer: I think I already gave you everything you need on that point.`，始终不给 order_id/speed）→ 用工具（find_user/get_orders）**本可拿到**该值，却**跳过**，把一个**从未给出**的值（如 `speed="standard"`）填进**不可逆**动作 `ship_order`/`refund` → `Irreversible error` → score 0。对照成功案例：`find_user→get_orders→**一次** ask（退款方式）→ 客户答 store_credit → `refund(method=store_credit)` → `finish`（n_asks=1，拿到确认值再动）。即 **失败 = 卡死在非解决 ask 环后用「猜」逃逸到不可逆动作；成功 = 一次问清确认值后正确执行**。
+
+**检测器（oracle-free，只用 trace 的可见信息）**：动作分类 IRREVERSIBLE = {`ship_order`,`refund`}；「石墙」回复 = ask_user 的 observation 短且命中 `already (gave|told|said)|i think|no (further )?info|nothing (more|else)|that's all|on my end|don't (?:have|see)`。规则（在 300 上扫描出的最优）：
+
+```
+flag  =  该 episode 取过 IRREVERSIBLE 动作  且  石墙回复数 >= 2
+```
+
+**结果（n=300，ground truth = trace 自带的 irreversible_error）**：
+
+| 规则 | TP | FP | FN | precision | recall | F1 |
+|---|---:|---:|---:|---:|---:|---:|
+| `irr & 石墙>=2`（**采用**） | 34 | 2 | 2 | **0.944** | **0.944** | **0.944** |
+| `irr & 石墙>=3` | 28 | 0 | 8 | 1.000 | 0.778 | 0.875 |
+| `irr & 最大ask连>=3` | 28 | 2 | 8 | 0.933 | 0.778 | 0.848 |
+
+采用 `石墙>=2`：**TP=34 / FP=2 / FN=2，P=R=F1=0.944**，且对 150 条干净的 multi **0 误报**。2 个 FN = `clarify-98`/`clarify-338`（n_asks=0，「不问直接猜」，另一种签名，需任务意图规则补）；2 个 FP = `clarify-100`/`188`（卡≥2 问后**用工具救回**并成功，nudge 而非硬拦可兜住）。
+
+**在线可落地（关键）**：所有 ask 都在不可逆动作**之前**，所以门可在 agent **提交** `ship_order`/`refund` 的瞬间触发：「已问 ≥2 次仍缺该值 → **不要猜进不可逆动作**；要么用工具（find_user/get_orders）取，要么换种问法，要么停下报告无法继续。」据此最多可**拦下 34/36（≈94%）的在环失败**，代价 ≈ 2/300 的误提示（nudge 不是硬拦）。
+
+**第二类（SWE「验证即提交」）**：与上不同类，见 §13.8——sympy-13757 在 cmd 31 已修好并验证（FAIL_TO_PASS 过）却在 commit 前被「due-diligence」循环耗尽预算。检测器 = 「FAIL_TO_PASS 通过 + 已有 edit → 强烈提示现在提交，别等全量测试」；n=2，机制已文档化，此处不复述。
+
+**交付物**：`scripts/false_done_detect.py`（`--input <trace.jsonl> [--eval] [--threshold 2]`，py_compile 通过，n=300 复现 F1 0.944）。
+
+**结论**：在**不动决策模型**（v8 继续生产）的前提下，得到一个**可复用、oracle-free、在线可触发**的执行层门，直接打掉该类在环失败的大头（94%）。这与 §13.12 的裁决一致：杠杆在执行/规划层；决策模型线（v3–v13）保持关闭。下一步可把该门接进 v2 agent 运行时的「提交前检查」，并扩展到第二类（验证即提交）的提交前检查。
+
