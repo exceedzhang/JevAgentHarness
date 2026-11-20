@@ -653,3 +653,64 @@ flag  =  该 episode 取过 IRREVERSIBLE 动作  且  石墙回复数 >= 2
 - 判据脚本：`research/scripts/select_tool_acceptance.py`——读 arm 结果 jsonl，算 in-loop 成功率 + 有害方向错误率，与基线对照，输出 PASS/FAIL。
 - 复用：`recov.py`（控制 vs 带门 per-task 对比）、`gate_eval.py`（§13.14 净0）、`false_done_detect.py`（§13.13 离线检测器）。
 
+## 13.18 select-tool 上线操作清单（v8 决策 + force-field 门）
+
+### 13.18.1 前置条件（必须全部满足）
+1. **推理栈在线**：`:8000` = `gateway`(nginx) → `litellm` → 3 个 vllm。验证：`curl -H "Authorization: Bearer sk-1234" http://127.0.0.1:8000/v1/models` 返回 `AgentDecision-4B`、`Qwen/Qwen3.8-27B`、`Qwen/Qwen3-Embedding-4B`。重启后若挂：`sudo docker start vllm-openai-0 vllm-openai-1 vllm-openai-2 gateway litellm-db`（litellm 依赖 `litellm-db` 的 Postgres）。
+2. **s1 = v8**（`type: jev` / `AgentDecision-4B`），**worker = 27B**（llm + small_llm）。
+
+### 13.18.2 配置位置（开/关门的唯一开关）
+门由 **arm 的 `tool_select.extra.pre_action_gate`** 控制。代码：`research/src/jevharness/harness/agent.py`（`_pre_action_gate` L234、hook L1761、`_FORCE_FIELD` L226、`_Episode.n_gate_fires`/`forced_ask_done` L165-166）。启用 force-field：
+
+```yaml
+# 参考 research/configs/v8_decomp_n300_ff.yaml
+arms:
+- name: v8_pa_ff
+  s1: v8                                    # AgentDecision-4B
+  tool_select:
+    mode: replace
+    extra:
+      pre_action_gate:
+        enabled: true
+        mode: force_field                    # ★ 关键：force_field（默认 "soft"=软门；arg_repair=参数补全）
+        irreversible: [cancel_order, refund, ship_order]   # 不可逆动作集合
+        stonewall_min: 2                     # ≥2 次客户石墙才触发
+        max_fires: 3                         # 单 episode 最多 3 次，之后 fail-open
+  routing: {mode: replace}
+  finish:  {mode: replace}
+```
+
+- **关闭门（回滚 = 只改这一处）**：`enabled: false`（或删 `pre_action_gate` 块）→ agent 回到无门 v8 基线。
+- `s1_cache` 用与基线**同一个**（`cache/s1_v8_decomp_pa.sqlite`），效果只归因于门。
+- 三种 mode：`force_field`（推荐，强制问对字段，264→298）/ `arg_repair`（补 order_id，264→265）/ 默认 `soft`（软门，264→264 净0，§13.14）。
+
+### 13.18.3 门何时触发（自动，无需人工）
+当 agent 即将调用 `irreversible` 中的动作 **且** 历史里已有 `≥ stonewall_min(2)` 次客户石墙回复（正则 `already (gave|told|said)|i think|no (further )?info|nothing (more|else)|that's all|on my end|don't (?:have|see)`）时：
+- **force_field**：把该动作**改写为** `ask_user(missing=<推断字段>)`（ship_order→shipping_speed / refund→refund_method / cancel_order→order_id）→ 客户 reveal 真值（不再石墙）→ 下一步 agent 带真值行动。
+- 日志打 `[pre-action-gate] FORCE-ASK ask_user({missing=...})`（grep 监控用）。
+- 触发后 `forced_ask_done=True` → 门让路（同 episode 不再改写）；`n_gate_fires ≥ max_fires(3)` 后 fail-open（放行，防死循环）。
+
+### 13.18.4 灰度步骤
+| 阶段 | 流量 | 观察 | 晋级判据 |
+|---|---|---|---|
+| **S0 离线/dry-run** | 0%（先跑 300 离线 `v8_decomp_n300_ff.yaml`） | success / harmful 率 / FORCE-ASK 次数 | success≥基线 且 0 回归 且 无异常 FORCE-ASK |
+| **S1** | 5–10% 生产 | ≥4h：成功率、有害率、FORCE-ASK 次数、不可逆报错 | 有害率≤基线 且 无用户投诉 |
+| **S2** | 25–50% | ≥1d | 同上 + 无延迟劣化 |
+| **S3** | 100% | 持续监控 | 稳定 |
+
+每阶段：`python -m jevharness.bench.runner <config> --out <dir>` 跑影子流量，再 `python research/scripts/select_tool_acceptance.py <新arm.jsonl> --baseline <旧arm.jsonl> --min-gain 0.05` 出 PASS/FAIL。
+
+### 13.18.5 回滚触发条件（满足任一即回滚 `enabled: false`）
+1. **有害方向错误率上升**：tool→reply / 假完成 / 不可逆动作 率 > 基线（~6%）。门本应把它从 12% 降到 0.67%，若反升 = 门误触发。
+2. **成功率下降**：in-loop success < 基线 264/300=88%（含 min-gain，如 <87%）。
+3. **新增不可逆业务事故**：生产里出现一次不该有的 ship/refund/cancel（用户投诉/监控）→ **立即回滚**。
+4. **门过度触发/误伤**：FORCE-ASK 在**非失败** episode 里异常多（拦了正常动作）→ 回滚。
+5. **fail-open 频繁**：`max_fires` 触发后大量 fail-open（agent 绕不过门）→ 回滚 + 查石墙正则。
+
+回滚后：agent 退化为无门 v8（基线行为），无残留状态（门是纯配置 + 每 episode 局部计数器 `n_gate_fires`/`forced_ask_done`）。
+
+### 13.18.6 注意事项
+- **作用域**：force-field 门目前在**研究 harness**（`research/src/jevharness/harness/agent.py`），**不在** 主引擎 `src/jevagentharness` / `litellm_jah` 插件里。若 select-tool 指**生产 litellm_jah** 上线，需先把门 port 到主引擎/插件（当前未 port）——这是生产化的关键前置。
+- **门只作用于含不可逆动作的场景**（clarify 类）；multi 类 episode 永不触发（§13.15 已验证 0 误伤），所以灰度主要是 clarify 类业务。
+- 门的收益（264→298）与 v8 决策模型**解耦**：即便未来换决策模型，force-field 门仍可独立保留。
+
