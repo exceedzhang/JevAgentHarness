@@ -215,6 +215,7 @@ def evaluate_decisions(model: Any, tok: Any, examples: list[dict[str, Any]], max
     model.eval()
     ex = [e for e in examples if 2 <= len(e["options"]) <= 52]
     acc, nll, conf, corr = [], [], [], []
+    reply_gold, reply_correct = [], []
     for s in range(0, len(ex), batch_size):
         chunk = ex[s:s + batch_size]
         items = []
@@ -233,11 +234,16 @@ def evaluate_decisions(model: Any, tok: Any, examples: list[dict[str, Any]], max
             nll.append(-float(sum(t * lp[i, k] for k, t in enumerate(it["target"]) if t > 0)))
             conf.append(float(lp[i, pred].exp()))
             corr.append(float(pred == g))
+            _rn = chunk[i]["options"].index("reply_without_tool") if "reply_without_tool" in chunk[i]["options"] else -1
+            if _rn >= 0 and chunk[i]["options"][g] == "reply_without_tool":
+                reply_gold.append(1)
+                reply_correct.append(float(pred == _rn))
     if was_training:
         model.train()
     n = max(1, len(acc))
+    _ra = (sum(reply_correct) / len(reply_gold)) if reply_gold else 1.0
     return {"n": len(acc), "acc": sum(acc) / n, "nll": sum(nll) / n, "brier_top1": brier(conf, corr),
-            "ece": ece(conf, corr)}
+            "ece": ece(conf, corr), "reply_acc": _ra}
 
 
 # ------------------------------------------------------------------ model
@@ -362,6 +368,7 @@ def train_torch(a: argparse.Namespace, rows: list[dict[str, Any]], names: list[s
     dev_best: float | None = None
     dev_bad = 0
     dev_key = {"brier": "brier_top1"}.get(a.early_stop_dev_metric, a.early_stop_dev_metric)
+    lam = a.lambda_init if a.constrain_reply else 0.0  # Lagrangian multiplier (reply constraint), updated on dev eval
 
     def logits(batch_rows: list[dict[str, Any]], grad: bool) -> torch.Tensor:
         enc = col([{"prompt": r["user_prompt"], "target": [0.0] * r["n_options"]} for r in batch_rows])
@@ -394,7 +401,13 @@ def train_torch(a: argparse.Namespace, rows: list[dict[str, Any]], names: list[s
             acts = rng.choices(range(len(lpT)), weights=lpT.exp().tolist(), k=G)
             samples.append(acts)
             old.append([float(lpT[k]) for k in acts])
-            rew.append([option_reward(names, weights, r, k) for k in acts])
+            def _rr(r_, k_):
+                _b = option_reward(names, weights, r_, k_)
+                _ridx = r_.get("reply_idx", -1)  # precomputed index of reply_without_tool (or -1)
+                if lam > 0 and _ridx >= 0 and int(r_["gold"]) == _ridx and k_ == r_["gold"]:
+                    return _b + lam
+                return _b
+            rew.append([_rr(r, k) for k in acts])
         flat = [x for rr in rew for x in rr]
         bstd = torch.tensor(flat).std().item() if len(flat) > 1 else 0.0
         adv = []
@@ -464,6 +477,10 @@ def train_torch(a: argparse.Namespace, rows: list[dict[str, Any]], names: list[s
             ckpt_log.append({"step": step, "path": str(ck), "dev": ev})
             print(f"[grpo_trl:torch] checkpoint step {step}: {ck}" +
                   (f" dev_acc={ev['acc']:.4f}" if ev else ""), flush=True)
+            if a.constrain_reply and ev is not None:
+                lam = max(0.0, min(a.lambda_max, lam + a.lambda_lr * (a.reply_floor - ev["reply_acc"])))
+                print(f"[grpo_trl:torch] reply-constraint: reply_acc={ev['reply_acc']:.4f} "
+                      f"(floor {a.reply_floor}) -> lam={lam:.4f}", flush=True)
             if ev is not None and dev_key:
                 value = float(ev[dev_key])
                 higher = dev_key == "acc"
@@ -564,6 +581,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--early-stop-dev-min-delta", type=float, default=0.0,
                     help="torch: minimum improvement in the dev metric to reset the patience counter")
     ap.add_argument("--report-to", default="none")
+    ap.add_argument("--constrain-reply", action="store_true",
+                    help="Lagrangian dual-ascent: keep dev reply_acc >= --reply-floor (+lam reward on correct reply picks)")
+    ap.add_argument("--reply-floor", type=float, default=0.69)
+    ap.add_argument("--lambda-init", type=float, default=0.0)
+    ap.add_argument("--lambda-lr", type=float, default=0.1)
+    ap.add_argument("--lambda-max", type=float, default=5.0)
     ap.add_argument("--seed", type=int, default=0)
     return ap.parse_args(argv)
 
