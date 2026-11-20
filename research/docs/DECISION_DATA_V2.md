@@ -304,3 +304,24 @@ tool_select 标签采集 ~300-500 条/天（shadow）；dev 264 条。
 - **E3（方向性惩罚 `reply_bound`：gold=reply 选 tool→−1）→ REJECTED（灾难性）**：acc 46.56（−4.63pp）；**reply 31.5→0.00（塌到 0，一次没选 reply）**。机制：−1 负奖励 + GRPO 组归一化 + `--skip-zero-std` 交互 → reply-gold 点 16 采样多为 tool 全拿 −1 → 零方差被 skip（无梯度），真正有梯度的只有本已对的组 → 净效果是把 reply 概率整体压到≈0，而非学会"何时 reply"。副作用 read/webfetch +6~8pp（"扫到地毯下"：放弃 reply 换 tool 精度）。**教训：GRPO 框架里加负奖励 = 系统性压制该选项，低概率选项（reply）会雪崩，方向惩罚不可用。**
 - **结论**：5 个 post-v8 角度全败（v9/v10/v11/E2a/E3），无一超 v8 56.4。reply↔tool 边界是所有版本共同死穴，现有"20+ 工具+reply 同空间+标量奖励"表示表达不出该边界。**奖励 / 参考分布线走死**。
 - **下一步（待用户定）**：A = 结构性突破（扩 eval 842→2-3k + 两阶段分解 先判"行动 or reply"→再判"哪个工具"）；B = 收手 v8 转系统层（路由+校准+集成）。详见 grpo 文档 §14。
+
+### 13.7 v8 在环失败分解（11-20）：瓶颈随任务类型而变
+
+- **方法**：真实在环跑批（v8 决策 + Qwen3.8-27B worker，routing/tool_select/finish 全 `replace`，JevGym v2 hard = clarify/multi 族，**n=300**，n_distractors=12 以过 v8 的 26 选项上限）。输出 `results/v8_decomp_n300`。每个失败 episode 用 oracle 信号（`oracle_tool` / `oracle_verdict` / `oracle_cost_to_go` / `oracle_finish_ok`）分类。
+- **结果（n=300，稳健）**：成功 264（**88%**），失败 36（12%）。失败分解：**选错工具 / 过早结束 32（89% 失败）** + 循环 / 耗尽步数 4（11%）。失败 episode 里 **44% 的步选错工具**（108/243）。
+- **关键发现（调和 #5）**：瓶颈**随任务类型而变**——工具密集型（JevGym）= **选错工具主导（89%）**；迭代密集型（SWE）= **死循环主导（67%**，#5 的 44/65）。两者都对，"工具选择是不是瓶颈"取决于任务类型。
+- **战略含义**：① 工具选择改善能收 JevGym 类 89% 残余失败，但受决策模型 **~56% 天花板**约束（v10/v11 验证难破）；② 循环/规划改善是**独立线**，迭代型任务 67% 失败源于此，**不受 56% 天花板约束**（不是单步分类、是规划/策略问题，天花板可能更高）；③ 生产两类任务都有 → 两杠杆都重要，但**工具选择已近上限、循环/规划更可能有 big win**。
+- **caveat**：89% 是"选错工具 + 过早结束"合并桶（精确拆分需 `oracle_finish_ok`，待补）；4 个循环案例太少。
+- **数据源**：`results/e4b_swe/per_instance.csv`（SWE，Gemini）+ `results/v8_decomp_n300`（JevGym，v8 in-the-loop）。
+- **下一步**：立项查 SWE 死循环具体模式（44 个 LimitsExceeded 案例在哪种任务、什么循环、可干预点）。
+
+### 13.8 SWE 死循环 trace 重跑（11-20）：循环的具体机制 + v8 缺口
+
+- **方法**：SWE-bench 预构建镜像拉不到（Docker Hub 被墙 + 镜像源白名单限制）→ 手工重建 2 个真实 SWE 环境（`python:3.6-slim` + GitHub 该 base_commit 的 tarball + 阿里 pip 源 + git，真实仓库/commit/bug 已验证精确复现）。v8（AgentDecision-4B）+ Qwen3.8-27B 均走现成 vllm:8000（未动生产 GPU0/2/3），逐步 trace 全捕获（30 步上限以在合理时间拿完整 trace）。报告 `results/swe_rerun_trace/REPORT.md`。
+- **循环机制（两类，trace 实证）**：
+  1. **django-10554 = 真·不收敛（环境不匹配 → 死循环）**：步骤 1-33 "探索踏车"（同一批核心文件反复读，`compiler.py` 30 步里读 7 次，**从没碰过源码**）；步骤 34-41 "假复现死循环"（重写 `/tmp/repro.py` 5 次全 rc=1）。根因 = 该 bug 只在支持 compound-clause ORDER BY 的后端（PostgreSQL）触发，环境是 **SQLite** → repro 永远复现不出 → 无法验证任何修法 → 在"多读代码 + 再试 repro"间打转到耗尽。
+  2. **sympy-13757 = 能收敛但被预算砍**：第 3 条命令复现 bug，第 31 条命令改对（一行 `_op_priority=10.001`），验证通过，被 30 步截断在跑全量测试 + 查边缘用例。E4b 里 250 步没解 ⇒ **250 步被"收尾/全量测试 due-diligence"吃掉，不是"改不动"**。
+- **v8（生产 System-1）的缺口（可测）**：① **routing 60/60 全判 "strong"（置信 ~1.0），从不降级 fast** → 难任务零成本节省；② **reflection 的"卡住了吗"在 django 连续 5 次复现失败时高置信答"没卡住"（0.87-0.96）→ 没检测到循环**；③ action_guard 健康（全放行）、stop 没机会触发（没走到提交）。
+- **可干预点（按性价比）**：① **无进展/只读循环检测**（连续 ~8-10 步纯只读 + 最近文件重叠高 → nudge"提交最小修改或换方向"，打 django 探索踏车）；② **假复现检测**（重复"重写 repro + 同错误"≥3 次 → 转"目标测试才是 ground truth，直接改源码跑那个测试"，打 django 假 repro 陷阱）；③ **验证即提交**（已编辑 + FAIL_TO_PASS 通过 → 强触发 stop"现在就提交"，别等全量套件，打 sympy 这类 productive-but-culled）；④ 把 v8 饱和的 "strong" 改成 "productive/stuck" 信号 + **修 reflection 失灵**。
+- **战略含义**：循环/规划线被证实**真实、有具体机制 + 可干预点、且 v8 有可修的具体缺口**（routing 饱和 + reflection 失灵）——比决策模型（已近极限）**更可能有大改善**。死循环不是"单步选错工具"，是**策略/环境匹配问题**（环境不匹配导致无法验证；改对了但收尾吃光预算）。
+- **caveat**：仅 2 个实例、30 步（非 250）；stop 钩子未验证到；未跑 sphinx/matplotlib。扩到 5-10 实例每个 ≈15-30 min。
