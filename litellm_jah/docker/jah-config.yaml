@@ -56,6 +56,11 @@ model_name: jah-auto
 # for any future guard/strong mode. Nothing is collected for `jah fit` right now: switch a point back to
 # {mode: "shadow"} to restart labelling (quoted strings only - YAML 1.1 reads a bare off/on as booleans).
 decisions:
+  # the action guard = the execution-layer force-field gate (points.py force_ask_note): prefilter "all"
+  # checks every tool call with the v8 decision model, and when the customer has deflected >=2 times
+  # (stonewalls) on an irreversible business op it forces an ask_user(missing=<field>). Matches the
+  # validated §13.22 :4001 settings (guard/all/tau0.3).
+  action: {mode: "guard", prefilter: "all", tau: 0.3}
   # tool_select: back in shadow for GRPO training-data collection (the state is now logged, so labelled rows
   # become training examples - research/docs/DECISION_DATA_V2.md). The fit verdict stands: no tau reached the
   # 95% agreement target, so the point must stay out of guard/trigger mode; shadow only labels.
