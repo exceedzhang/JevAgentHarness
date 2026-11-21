@@ -869,6 +869,47 @@ flowchart TD
 - **配置**（:4001 `jevgym/jah-config.yaml`）：`decision` = jev/v8（决策后端 @172.18.0.1:8000）、`decisions` = {action: guard/all/τ0.3, tool_select: guard, stop: shadow}、`strong` = 27B、`action_question_prefix` = 客户支持域框架、`enable_thinking: false`。
 - **日志**：`settle()` 每步写一行 `decisions.jsonl`（+ `requests.jsonl`/`traces.jsonl`）到 `/logs` volume，供 §13.17 验收 + `JAH_DEBUG=1` 调试。
 
+#### 本地 litellm-jah 容器（:4000）当前运行流程（mermaid，2026-11-21 更新）
+
+本地 `litellm-jah` 容器（`litellm_jah/docker/`，端口 **4000**，image `litellm-jah:latest`，伴生 redis）是**实际在跑**的那一个。与 §13.22 的 :4001 部署不同，它把 **AgentDecision-4B 同时用作复杂度高低分类器（tier 路由）和各决策点后端**：
+
+```mermaid
+flowchart TD
+    A["客户端（agent）"] -->|"POST /v1/chat/completions<br/>+ master-key 鉴权"| B[":4000 litellm 代理<br/>litellm-jah-litellm-jah-1<br/>image litellm-jah:latest"]
+    B --> C["JAH 前置 precall · tier 路由<br/>mode=cascade，τ 0.85，first_steps_strong=1<br/>分类器=AgentDecision-4B<br/>(ssh-tunnel:8000 /v1/systemone)"]
+    C --> C1{"tier 判定"}
+    C1 -->|SIMPLE| D1["jah-fast<br/>Qwen3.8-27B<br/>(ssh-tunnel:8000 /v1)"]
+    C1 -->|COMPLEX / 出错→strong| D2["jah-strong<br/>deepseek-v4.1-flash<br/>(maas cn-beijing)"]
+    D1 --> E["JAH 后置 postcall · JahPostCall._check()<br/>各决策点后端 = AgentDecision-4B"]
+    D2 --> E
+    E --> E2["tool_select 门 (guard)<br/>base τ 0.99≈交给 LLM<br/>仅 shell τ 0.83 自动选择 (tool_tau)"]
+    E --> E4["ACTION 门 (force-field, guard)<br/>prefilter:all + 客服域 framing，τ 0.3"]
+    E --> E1["stop 门 (shadow, 只打标)"]
+    E4 --> E4a["每个工具调用一次 v8 风险判定"]
+    E4a --> Q1{"有风险 (p≥0.3)<br/>且 客户 ≥2 次石墙?"}
+    Q1 -->|是| N4["force_ask_note：<br/>改 ask_user(missing=推断字段)<br/>ship→shipping_speed / refund→refund_method / cancel→order_id"]
+    Q1 -->|否| F{"任一门命中?"}
+    E1 --> F
+    E2 --> F
+    N4 --> F
+    F -->|否| G["settle()"]
+    F -->|是| R["强档重跑 (jah-strong=deepseek-v4.1-flash)<br/>带门 note 重新生成 (in_check 防递归)"]
+    R --> Q2{"重跑后仍是有风险动作?"}
+    Q2 -->|是| R2["第二次重跑 (one more look)"]
+    Q2 -->|否| G
+    R2 --> G
+    G --> G1["写 decisions.jsonl + steps.jsonl → ~/.jah/litellm-logs<br/>(log_decision_state: true 含完整 state)"]
+    G1 --> H["响应返回客户端"]
+```
+
+**当前配置要点**（`litellm_jah/docker/{jah-config,litellm_config}.yaml`）：
+- **模型路由**：`jah-auto` = `auto_router/complexity_router`，分类器 `litellm_jah.classifier.jah_classifier` = AgentDecision-4B；SIMPLE→`jah-fast`（Qwen3.8-27B @ ssh-tunnel:8000）、COMPLEX→`jah-strong`（deepseek-v4.1-flash @ maas）；default+fallback=`jah-strong`。
+- **tier 路由**：`mode: cascade`、`tau: 0.85`、`first_steps_strong: 1`、`on_error: strong`。
+- **决策点**：`action` = guard/all/τ0.3 + 客服域 `action_question_prefix`（ship_order/refund/cancel_order 不可逆，未确认值→risky）；`tool_select` = guard/τ0.99/`max_options 26`/`tool_tau:{shell:0.83}`（只有 shell 会被 router 自动选，其余交给 LLM）；`stop` = shadow（只打标）。
+- **日志**：`log_dir: ~/.jah/litellm-logs`（`decisions.jsonl`/`steps.jsonl`）、`log_decision_state: true`（含完整 state，可转 GRPO/SFT）。
+
+> 与 :4001（§13.22/§13.23）的差异：:4001 用 `routing: off`（27B 直通，v8 做工具决策）；本地 :4000 用 **AgentDecision-4B 做 tier 路由 + 各决策点**，`tool_select` 只对 `shell` 自动选择（τ0.83）、其余交给 LLM。
+
 ## 13.24 v8 工作线实践总览（§13.1–13.23 小结）
 
 **总览**：v8 这条线走的是「先被卡死在天花板 → 发现天花板是假象 → 真正的杠杆在执行层 → 把执行层门产品化并部署上线」的路。v8 是生产决策模型（56.4% gold-match，v3–v13 里最好）；决策模型训练线反复尝试都**破不了天花板**；后来证明 56% 里一大块是**度量伪影**，真正的缺口（假完成/抢答）在**执行层**——用 **force-field 硬补救（强制问对字段）**把在环从 264 拉到 298/300，再把它**移植进 litellm_jah**、部署到 :4001 并验证**可放量**。
