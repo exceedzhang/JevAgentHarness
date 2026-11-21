@@ -61,12 +61,14 @@ decisions:
   # (stonewalls) on an irreversible business op it forces an ask_user(missing=<field>). Matches the
   # validated §13.22 :4001 settings (guard/all/tau0.3).
   action: {mode: "guard", prefilter: "all", tau: 0.3}
-  # tool_select: back in shadow for GRPO training-data collection (the state is now logged, so labelled rows
-  # become training examples - research/docs/DECISION_DATA_V2.md). The fit verdict stands: no tau reached the
-  # 95% agreement target, so the point must stay out of guard/trigger mode; shadow only labels.
+  # tool_select: now ACTIVE in guard — the router takes over only for `shell`, auto-selecting it when
+  # P(shell is safe) >= 0.83 (the fit's narrow per-tool guard, tool_tau.shell). Every other tool uses
+  # tau: 0.99 ≈ "never auto-select", so the LLM still picks all non-shell tools; guard defers to the LLM
+  # whenever the router is below its threshold, so it only acts where the fit validated agreement.
+  # (Fit basis: shell 90% agreement @ n>=30, target 0.90, z=0; see research/docs/DECISION_DATA_V2.md.)
   # max_options: the AgentDecision-4B card caps next_tool at 26 options (HTTP 400 above); 27/53-tool sessions
   # produced 72 such errors on 11-07/08, so the knockout (two-round chunked ask) kicks in from 27 tools up.
-  tool_select: {mode: "shadow", max_options: 26}
+  tool_select: {mode: "guard", tau: 0.99, max_options: 26, tool_tau: {shell: 0.83}}
   # stop is off on purpose: on AgentDecision-4B calibrated (81 labelled decisions) it agrees with the strong
   # verdict on 61.7% of final replies and no tau reached the 95% target - and in shadow the strong redo's reply
   # was discarded anyway, so the mode bought labels, not protection, at the price of one strong call on every
