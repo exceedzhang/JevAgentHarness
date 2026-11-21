@@ -28,6 +28,9 @@ logs/
 steps.jsonl
 states.jsonl
 
+# Local run configs carrying a deployment key (kept out of the repo)
+research/configs/v8_decomp_n300_s1.yaml
+
 # Editors and OS
 .idea/
 .vscode/
