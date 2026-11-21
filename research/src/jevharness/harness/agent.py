@@ -249,6 +249,12 @@ def _pre_action_gate(cfg, name: str, args, history, ep):
     irr = gate.get("irreversible") or ["cancel_order", "refund", "ship_order"]
     if name not in irr:
         return None
+    if gate.get("mode") == "litellm_jah":
+        # the REAL litellm_jah JahPostCall action guard (note + redo). It needs the worker LLM, the full
+        # message history and the 27B action-risk decision, so it is performed in the tool loop (see
+        # _litellm_jah_gate). Only the irreversibility check happens here; the stonewall count, the per-episode
+        # cap and the 27B decision are the litellm_jah check's own (it stays stateless, as in the plugin).
+        return {"kind": "litellm_jah"}
     if ep.n_gate_fires >= int(gate.get("max_fires", 3)):
         return None
     sw_min = int(gate.get("stonewall_min", 2))
@@ -1012,6 +1018,57 @@ class JevAgent:
         type as before."""
         return coerce(v, p) if isinstance(v, str) else v
 
+    def _litellm_jah_gate(self, llm: LLMClient, tools: list[dict[str, Any]], messages: list[dict[str, Any]],
+                          name: str, args: dict[str, Any], ledger: Ledger, slog: StepLog,
+                          ep: "_Episode") -> tuple[str, dict[str, Any], str] | None:
+        """The litellm_jah action-guard NOTE+REDO. Asks the REAL litellm_jah ``JahPostCall`` action check
+        whether this irreversible action (the customer already stonewalled) gets a force note from the 27B
+        action-risk decision; if so, appends the note to the history, re-calls the 27B worker to re-decide
+        (the litellm_jah strong redo -- the agent re-decides, never overridden), and returns the new action to
+        execute. Returns None when the guard declines (the proposed action runs unchanged).
+
+        The guard is the litellm_jah check's own (stateless: stonewall count from the messages + the 27B
+        safe/risky decision); the harness only caps the number of redos per episode (``max_redos``, a dynamic
+        ``ep.lj_redos`` counter) so the agent is not nudged into a loop, and it is fail-open (any error lets
+        the action proceed, as litellm_jah falls back to the LLM-only behaviour on a decision-model failure).
+        """
+        try:
+            from ..bench.litellm_jah_gate import llm_conn, lj_action_note, lj_count_stonewalls
+        except Exception:  # noqa: BLE001 - litellm_jah not importable: the guard is unavailable (fail-open)
+            return None
+        gate = getattr(getattr(self.cfg, "tool_select", None), "extra", None) or {}
+        gate = gate.get("pre_action_gate") or {}
+        max_redos = int(gate.get("max_redos", 2))
+        if getattr(ep, "lj_redos", 0) >= max_redos:
+            return None  # the cap: step aside so the agent can act with what it has
+        conn = llm_conn(llm)
+        if conn is None:
+            return None  # not an OpenAI-compatible worker: the guard cannot run (fail-open)
+        base_url, api_key, model = conn
+        # cheap stonewall pre-filter (the litellm_jah count, pure): do not pay a 27B decision call when the
+        # customer has not stonewalled -- the same count the guard recomputes as its authoritative source
+        sw_min = int(gate.get("stonewall_min", 2))
+        if lj_count_stonewalls(messages) < sw_min:
+            return None
+        note = lj_action_note(name, args, messages, base_url, api_key, model, tau=float(gate.get("tau", 0.3)))
+        if note is None:
+            return None  # the 27B did not flag the action risky (or the guard failed open)
+        ep.lj_redos = getattr(ep, "lj_redos", 0) + 1
+        field = "missing='...'"
+        m = re.search(r"missing='([^']*)'", note)
+        if m:
+            field = f"missing='{m.group(1)}'"
+        print(f"[litellm_jah-gate] force-note: {name} -> ask {field} (27B action-risk=risky, stonewalls>={sw_min}); "
+              f"redo {ep.lj_redos}/{max_redos} -- the worker re-decides", flush=True)
+        # the litellm_jah strong redo: the force note into a copy of the history (litellm_jah's with_notes
+        # mutates a copy, not the request), then re-call the 27B worker to re-decide
+        redo_msgs = list(messages)
+        append_note(redo_msgs, note)
+        resp = self._llm_call(llm, redo_msgs, tools, ledger, DP.TOOL_SELECT.value, slog)
+        name2, args2, cid2 = self._resp_to_call(resp, self.cfg.final_tool)
+        print(f"[litellm_jah-gate] redo action: {name2}({json.dumps(args2, ensure_ascii=False)[:140]})", flush=True)
+        return name2, args2, cid2
+
     def _tool_step(self, llm: LLMClient, env: Env, tools: list[dict[str, Any]], messages: list[dict[str, Any]],
                    state: str, ledger: Ledger, slog: StepLog) -> tuple[str, dict[str, Any], str]:
         oracle = env.oracle_action()
@@ -1759,7 +1816,15 @@ class JevAgent:
                                        tool_choice={"type": "function", "function": {"name": cfg.final_tool}})
                     name, args, cid = self._resp_to_call(r, cfg.final_tool)
                 gate_res = _pre_action_gate(cfg, name, args, history, ep)
-                if gate_res is not None and gate_res.get("kind") == "repair":
+                if gate_res is not None and gate_res.get("kind") == "litellm_jah":
+                    # NOTE+REDO (the real litellm_jah action guard): the 27B action-risk decision flagged this
+                    # irreversible action (with the customer stonewalled). Append the force note to the history
+                    # and re-call the 27B worker to re-decide (the litellm_jah redo), then execute the new
+                    # action. Returns None when the guard declines (the proposed action runs unchanged).
+                    redone = self._litellm_jah_gate(llm, tools, messages, name, args, ledger, slog, ep)
+                    if redone is not None:
+                        name, args, cid = redone
+                elif gate_res is not None and gate_res.get("kind") == "repair":
                     # hard arg-repair (DCSV2 §13.14b): fill the irreversible action with the
                     # order the agent already obtained from get_orders, then execute the fix.
                     args = gate_res["args"]

@@ -714,3 +714,31 @@ arms:
 - **门只作用于含不可逆动作的场景**（clarify 类）；multi 类 episode 永不触发（§13.15 已验证 0 误伤），所以灰度主要是 clarify 类业务。
 - 门的收益（264→298）与 v8 决策模型**解耦**：即便未来换决策模型，force-field 门仍可独立保留。
 
+## 13.19 litellm_jah 门 S0 灰度验证：真接 300 在环 = 298/300（与直接覆盖持平）
+
+**动机**：§13.18 要求灰度验证（S0 离线 300 → S1–S3 真实流量）。litellm_jah 版是 note+redo（弱于 research 直接覆盖），需实测其在环恢复率。用户选「真接 litellm_jah 进 300」（最忠实：用**真实 litellm_jah `JahPostCall`**，非 research 等价物）。
+
+**集成**（research 侧薄适配层，不改 litellm_jah 包）：
+- `litellm_jah_gate.py`：搭 `JAHRouter`（action guard + `prefilter: all` + `tau 0.3`）+ `JahPostCall`，**决策后端 = 27B**（判 safe/risky）；`recall` 不依赖 litellm（aiohttp 直调 27B）。`lj_action_note` 调**真实** `_action_check`，仅在返回 force note 时触发。
+- `agent.py` 新增 gate 模式 `litellm_jah`：irreversible + ≥2 石墙（廉价预筛，`lj_count_stonewalls`）→ 调 litellm_jah 判 risky → 若 force note 则 **note+redo**（加 note 到历史副本 + 重调 27B 重决策，**不覆盖**）；redo 结果直接用（绕过 v8 tool_select 覆盖——这正是 litellm_jah 语义：强档重调后的结果即最终动作）。`ep.lj_redos` 上限 2。
+
+**结果**（300 在环，独立复算验证；log 36 force-note + 36 redo action，1:1，0 error）：
+
+| | 成功 | clarify | multi |
+|---|---|---|---|
+| 控制（无门） | 264/300 | 114/150 | 150/150 |
+| **litellm_jah note+redo** | **298/300** | 148/150 | 150/150 |
+| research 直接覆盖（参考） | 298/300 | 148/150 | 150/150 |
+
+**净 +34（264→298），0 误伤**。救回 34 个 clarify-fail；剩 2（`clarify-98/338`，`n_asks=0` 抢答 refund——≥2 石墙门无法触发，与直接覆盖的 2 个相同）。
+
+**与直接覆盖持平（关键发现）**：预期 note+redo（只 nudges、不强制）会 < 298；**实测持平**。原因：27B worker 在全部 36 个 redo 中**遵循了 force note**（每个 redo 动作都是 `ask_user`）——nudging 达到了与 forcing 相同的恢复率。即：**具体的 force note（明确"问 shipping_speed"）比 §13.14 的通用 note（净 0）有效得多**；litellm_jah 的 note+redo 机制在本域**足够**，不必强依赖直接覆盖。
+
+**两个注意点（生产须知）**：
+1. **27B 是推理模型**：action 判定调用必须 `chat_template_kwargs: {enable_thinking: false}`（否则 reasoning 耗尽 token 返回空）。生产配置必须带上。
+2. **action 问题需域适配**：litellm_jah 的 action 问题是给 coding agent 写的（"危险命令吗"），在客服域 27B 把正常 business 动作（`ship_order` 带真实 order_id）读成"安全"（p_risky≈0.1）→ 门不触发。集成在决策 prompt 前加了**域框架**（"客服任务；ship/refund/cancel 是不可逆 business 操作，仅当客户未确认所需值时 risky"）→ 27B 正确判 risky（stonewalled→risky / confirmed→safe / read-only→safe，已验证）。这是用 27B 作决策模型、把 litellm_jah 问题**锚定到客服域**的必要适配（`_action_check` 原样调用）。**生产含义**：litellm_jah 的 action 问题/`tau` 需按目标域调参，不能直接用 coding 默认。
+
+**结论**：litellm_jah note+redo force-field 在客服 300 在环 = **298/300，与 research 直接覆盖持平、0 误伤** → **可上线**（配 §13.18.4 灰度 + 上述域适配 + `enable_thinking: false`）。note+redo（弱机制）在本域够用，因为 27B 遵循具体 note。
+
+**交付物**：`research/src/jevharness/bench/litellm_jah_gate.py`（适配层）+ `agent.py`（`litellm_jah` gate 模式）+ `configs/v8_decomp_n300_litellm_jah.yaml` + 服务器 `/data1/apps/jah_litellm`（litellm_jah 包）+ 结果 `/tmp/lj_full`（298/300）+ log `/tmp/lj_full.log`。
+
