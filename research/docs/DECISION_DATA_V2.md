@@ -742,33 +742,6 @@ arms:
 
 **交付物**：`research/src/jevharness/bench/litellm_jah_gate.py`（适配层）+ `agent.py`（`litellm_jah` gate 模式）+ `configs/v8_decomp_n300_litellm_jah.yaml` + 服务器 `/data1/apps/jah_litellm`（litellm_jah 包）+ 结果 `/tmp/lj_full`（298/300）+ log `/tmp/lj_full.log`。
 
-## 13.22 S1 选项A：:4001 部署的 litellm_jah 作为决策层（v8 tool_select + 门）— 在环全量 297/300，可放量
-
-§13.21 用 litellm_jah 的 **in-process 适配层**（298/300）验证了 force-field 逻辑；本节把它放到**真正部署的 :4001 litellm_jah 代理**上、并让 litellm_jah 成为**决策层**（v8 tool_select + action 门），验证生产路径。
-
-**配置**：:4001 `jah-config.yaml` 的 `decision` 从 27B 改为 **v8（jev @ 172.18.0.1:8000）**，`decisions.tool_select` 从 shadow 改 **guard**（litellm_jah 用 v8 做 tool_select，v8 同时管 tool_select + action 门；27B 是 strong/redo）；agent 配置 `v8_decomp_n300_s1.yaml`：worker(27B) → :4001 `jah-strong`，**arm `tool_select: shadow`**（让 agent 信任 :4001 的 v8 决策，而不是 agent 自己 v8-replace 覆盖）。
-
-**结果（全量 300）**：
-
-| | 成功 | 有害方向 | 成功率 |
-|---|---|---|---|
-| 基线（:8000，v8 tool_select=replace，无门） | 264/300 | 36/300 | 88.00% |
-| **:4001 litellm_jah 决策层（v8 tool_select guard + 门；agent tool_select=shadow）** | **297/300** | **0/300** | **99.00%** |
-
-**`select_tool_acceptance.py` 判定：PASS ✓ 可放量**（成功率 99% ≥ 基线+5pp；有害 0% ≤ 基线 12%）。
-
-**关键发现（`tool_select` 模式决定成败）**：
-- `tool_select: replace`（agent 自己 v8 覆盖工具选择）→ :4001 的门被**旁路**（agent 的 v8 覆盖了 :4001 的输出）→ **无变化**（option-a 金丝雀 20/23 = 基线，0 救回）。
-- `tool_select: shadow`（agent **信任** :4001 的 v8 决策）→ :4001 的 v8 tool_select + 门在**最终动作**上生效 → **297/300**。
-
-**与 3 种门实现一致（关键一致性）**：S0 in-process litellm_jah 适配层 **298/300**；S1 选项A :4001 部署代理 **297/300**；research 直接覆盖 force-field **298/300**。**三者 ≈99%、0 有害**——force-field（无论 note+redo 还是直接覆盖、in-process 还是部署代理）在本域一致地救回 clarify-fails。
-
-**2 个剩余 fail**：`clarify-98`/`clarify-338`（`n_asks=0` 抢答 refund，≥2 石墙门不触发）——与之前所有实现相同。
-
-**结论**：**部署在 :4001 的 litellm_jah（v8 tool_select + action 门）作为决策层 = 297/300（99%）、0 有害方向 → 可放量**（按 §13.18.4 灰度）。前提：`tool_select: shadow`（让代理的决策生效）+ v8 作为 :4001 决策后端（jev @ 172.18.0.1:8000）+ 域适配（§13.21 注意点）+ `enable_thinking: false`。
-
-**交付物**：`research/configs/v8_decomp_n300_s1.yaml`（worker→:4001，tool_select shadow）+ 服务器 :4001 jah-config（decision=jev/v8，tool_select=guard）+ 结果 `/tmp/s1_optionA/v8_failure_decomp_pa_s1/v8_pa_s1.jsonl`（297/300）+ log `/tmp/s1_optionA.log`。
-
 ---
 
 ## 13.20 litellm_jah 容器正式部署（:4001，与现有 stack 并行）
@@ -824,6 +797,35 @@ arms:
 **6. 监控（S1 期间）**：litellm_jah 的 `/logs` volume（`decisions.jsonl`/`requests.jsonl`/`traces.jsonl`，已挂服务器 `litellm_jah/logs/`）+ 门触发标记 + 延迟 + 27B 用量；`JAH_DEBUG=1` 开详细日志。
 
 **7. 上线前 checklist**：✅ :4001 部署+验证（§13.20）；✅ 持久 master key（§13.20 注 + 本次）；✅ force-field 离线 S0 在环 298/300（§13.19）；⬜ S1 5–10% 金丝雀 + §13.17 验收门。
+
+---
+
+## 13.22 S1 选项A：:4001 部署的 litellm_jah 作为决策层（v8 tool_select + 门）— 在环全量 297/300，可放量
+
+§13.21 用 litellm_jah 的 **in-process 适配层**（298/300）验证了 force-field 逻辑；本节把它放到**真正部署的 :4001 litellm_jah 代理**上、并让 litellm_jah 成为**决策层**（v8 tool_select + action 门），验证生产路径。
+
+**配置**：:4001 `jah-config.yaml` 的 `decision` 从 27B 改为 **v8（jev @ 172.18.0.1:8000）**，`decisions.tool_select` 从 shadow 改 **guard**（litellm_jah 用 v8 做 tool_select，v8 同时管 tool_select + action 门；27B 是 strong/redo）；agent 配置 `v8_decomp_n300_s1.yaml`：worker(27B) → :4001 `jah-strong`，**arm `tool_select: shadow`**（让 agent 信任 :4001 的 v8 决策，而不是 agent 自己 v8-replace 覆盖）。
+
+**结果（全量 300）**：
+
+| | 成功 | 有害方向 | 成功率 |
+|---|---|---|---|
+| 基线（:8000，v8 tool_select=replace，无门） | 264/300 | 36/300 | 88.00% |
+| **:4001 litellm_jah 决策层（v8 tool_select guard + 门；agent tool_select=shadow）** | **297/300** | **0/300** | **99.00%** |
+
+**`select_tool_acceptance.py` 判定：PASS ✓ 可放量**（成功率 99% ≥ 基线+5pp；有害 0% ≤ 基线 12%）。
+
+**关键发现（`tool_select` 模式决定成败）**：
+- `tool_select: replace`（agent 自己 v8 覆盖工具选择）→ :4001 的门被**旁路**（agent 的 v8 覆盖了 :4001 的输出）→ **无变化**（option-a 金丝雀 20/23 = 基线，0 救回）。
+- `tool_select: shadow`（agent **信任** :4001 的 v8 决策）→ :4001 的 v8 tool_select + 门在**最终动作**上生效 → **297/300**。
+
+**与 3 种门实现一致（关键一致性）**：S0 in-process litellm_jah 适配层 **298/300**；S1 选项A :4001 部署代理 **297/300**；research 直接覆盖 force-field **298/300**。**三者 ≈99%、0 有害**——force-field（无论 note+redo 还是直接覆盖、in-process 还是部署代理）在本域一致地救回 clarify-fails。
+
+**2 个剩余 fail**：`clarify-98`/`clarify-338`（`n_asks=0` 抢答 refund，≥2 石墙门不触发）——与之前所有实现相同。
+
+**结论**：**部署在 :4001 的 litellm_jah（v8 tool_select + action 门）作为决策层 = 297/300（99%）、0 有害方向 → 可放量**（按 §13.18.4 灰度）。前提：`tool_select: shadow`（让代理的决策生效）+ v8 作为 :4001 决策后端（jev @ 172.18.0.1:8000）+ 域适配（§13.21 注意点）+ `enable_thinking: false`。
+
+**交付物**：`research/configs/v8_decomp_n300_s1.yaml`（worker→:4001，tool_select shadow）+ 服务器 :4001 jah-config（decision=jev/v8，tool_select=guard）+ 结果 `/tmp/s1_optionA/v8_failure_decomp_pa_s1/v8_pa_s1.jsonl`（297/300）+ log `/tmp/s1_optionA.log`。
 
 ---
 
