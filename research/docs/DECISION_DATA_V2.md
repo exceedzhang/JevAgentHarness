@@ -710,7 +710,7 @@ arms:
 回滚后：agent 退化为无门 v8（基线行为），无残留状态（门是纯配置 + 每 episode 局部计数器 `n_gate_fires`/`forced_ask_done`）。
 
 ### 13.18.6 注意事项
-- **作用域**：force-field 门目前在**研究 harness**（`research/src/jevharness/harness/agent.py`），**不在** 主引擎 `src/jevagentharness` / `litellm_jah` 插件里。若 select-tool 指**生产 litellm_jah** 上线，需先把门 port 到主引擎/插件（当前未 port）——这是生产化的关键前置。
+- **作用域**：force-field 门原本在**研究 harness**（`research/src/jevharness/harness/agent.py`），不在主引擎 `src/jevagentharness` / `litellm_jah` 插件里。**已移植到 litellm_jah**（commit `3c148d6`：`litellm_jah/litellm_jah/points.py` 新增 `_GATE_STONEWALL_RE`/`_FORCE_FIELD`/`_count_stonewalls`/`force_ask_note`，`postcall.py` 的 `_action_check` 接入；244 测试通过）。litellm_jah 版为 **note+redo** 机制（只能加一条强制提问 note 让 agent 重新决策，不能直接执行工具调用，故效果弱于研究版的直接 override，灰度时需按 §13.18.4 的判据验证）。
 - **门只作用于含不可逆动作的场景**（clarify 类）；multi 类 episode 永不触发（§13.15 已验证 0 误伤），所以灰度主要是 clarify 类业务。
 - 门的收益（264→298）与 v8 决策模型**解耦**：即便未来换决策模型，force-field 门仍可独立保留。
 
