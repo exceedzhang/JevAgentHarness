@@ -742,3 +742,32 @@ arms:
 
 **交付物**：`research/src/jevharness/bench/litellm_jah_gate.py`（适配层）+ `agent.py`（`litellm_jah` gate 模式）+ `configs/v8_decomp_n300_litellm_jah.yaml` + 服务器 `/data1/apps/jah_litellm`（litellm_jah 包）+ 结果 `/tmp/lj_full`（298/300）+ log `/tmp/lj_full.log`。
 
+---
+
+## 13.20 litellm_jah 容器正式部署（:4001，与现有 stack 并行）
+
+把 litellm_jah 以**独立容器**形式部署为生产推理路径（S0 灰度 §13.19 之后）。用户决策：①**并排**（:4001，不动现有 :8000/:4000 stack）；②**strong=fast=27B**（27B 既是 worker 也是 action 决策模型，与 S0 一致）；③把 S0 证明必要的 2 处代码适配做成**可配置**（config-driven，保持 litellm_jah 通用）。
+
+**2 处 litellm_jah 代码适配（均可配置、默认关 → 不配置时 stock 行为不变）：**
+1. `action_question_prefix`（`config.py`/`postcall.py`）：action 问题前的**域框架**（§13.19 的 S0 域框架文本，逐字一致），仅配置时生效。
+2. **`OpenAIBackend`**（`backend.py`，新增）：stock 的 `backend.py` 只有 `jev`/`rules`/`none` 三种决策后端、无 OpenAI chat-completions 后端 → 新增，使 27B 能同时作 worker + 决策模型；`enable_thinking`（decision 配置 type `openai` 的字段）仅在显式设置时转发到 `chat_template_kwargs`（默认关）。
+- litellm_jah 测试 **262 通过**（原 246 + 新增 16，覆盖 2 个新配置字段 + OpenAIBackend）。
+
+**3 个适配配置**（`litellm_jah/docker/jevgym/`，新目录，stock 配置不动）：
+- `docker-compose.yml`：端口 **4001:4000**（避开现有 litellm :4000）、join 现有 `ubuntu_default` 网络（容器能直接 reach 27B）、独立 project name（`litellm-jah-jevgym`）+ 独立 redis + log 目录。
+- `jah-config.yaml`：`decision: {type: openai, model: Qwen/Qwen3.8-27B, base_url: http://vllm-openai-0:8000/v1, enable_thinking: false}`；`action_question_prefix` = 域框架；**`decisions: {action: {mode: guard, prefilter: all, tau: 0.3}, tool_select: shadow, stop: shadow}`**（action 门**开**，其余 shadow 不影响主流程）；`strong`=27B；`mode: off`（两层都是 27B，routing 无意义，省掉每请求决策调用）。
+- `litellm_config.yaml`：`jah-strong` 与 `jah-fast` 都 → `openai/Qwen/Qwen3.8-27B` @ `vllm-openai-0:8000/v1`；3 个 callbacks（precall/postcall/step-logger）不变。
+
+**部署 + 验证**：
+- 构建 `litellm-jah:latest` + `docker compose up`（2 容器：litellm:4001 + redis）。一个坑：服务器上 litellm_jah 包是**陈旧版**（points.py 在 force-field commit 之前，无 `_count_stonewalls`）→ md5-diff 整包（只有 points.py 不同）→ 同步 → 重建。
+- **已验证**：:4001 起 + **能工作**（用 master key：`/v1/models`→200，chat completion→200 出有效 27B 回复）；JAH postcall 以 `action: guard` 运行（容器 log 确认）；**现有 :8000 stack 完全没动**（gateway :8000→200，现有 litellm :4000→200，原容器不变）。27B 经 `ubuntu_default` 网络 `vllm-openai-0:8000/v1` 直连（与 nginx + 现有 litellm 解耦）。
+- **门触发（JAH_DEBUG + journals 证据）**：测试调用（查到订单 + 2 次客户石墙 + 提出 `ship_order(order_id, shipping_speed=standard)`）→ 27B 用猜的 speed 发货 → action 门（27B 决策，带域框架）判 risky 0.9 ≥ 0.3 → redo → force-field（≥2 石墙）→ **`ask_user(missing="shipping_speed", ...)`**（与 force-field 问题一致）。对照：`read_order` 判为安全（不 redo）。
+
+**2 个生产须知**：
+1. **master key**：容器入口在 `LITELLM_MASTER_KEY` 未设时会**自动生成**（15 字符、重启即变）。生产应**显式设** `LITELLM_MASTER_KEY`（持久）。鉴权用 master key（非 27B 后端 key）；用错 key 会报 "No connected db"（LiteLLM 对非 master-key 做 DB 查用户，无 Postgres 即此错——benign，master key 直接校验不查库）。
+2. **27B 是推理模型**：decision 调用带 `enable_thinking: false`（否则 reasoning 耗尽 token）。
+
+**结论**：litellm_jah 容器已在 :4001 部署 + 验证可工作（现有 stack 并行不扰、门按 §13.18.4 可触发）。这是 select-tool 上线（§13.17/§13.18）的**生产推理路径**，下一步是按 §13.18.4 灰度把流量逐步路由到 :4001（用 §13.17 的 `select_tool_acceptance.py` 门控）。
+
+**交付物**：`litellm_jah/litellm_jah/{backend,config,postcall}.py`（2 配置字段 + OpenAIBackend）+ `litellm_jah/tests/`（3 个测试文件，262 通过）+ `litellm_jah/docker/jevgym/`（3 个配置）+ 服务器已构建运行 `litellm-jah:latest`（:4001）。
+

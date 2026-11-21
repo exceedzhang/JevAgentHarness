@@ -4,6 +4,10 @@ Ported from ``jevagentharness.decision`` (MIT). Backends:
 
 ``jev`` any server that speaks the Jev System-One wire format (``POST {base}/v1/systemone``): TypeSafe's hosted
 Jev, Jev through OpenRouter, or a self-hosted decision model. The answer is a probability per option.
+``openai`` any OpenAI-compatible chat-completions server (``POST {base}/chat/completions``): the state and the
+question are sent as one chat message, the model answers with one of the options, and the answer is mapped to a
+deterministic probability. Lets a single capable model be both the worker LLM and the decision model; a
+``enable_thinking`` switch (Qwen3 / reasoning models) is forwarded only when set.
 ``rules`` no model at all: transparent heuristics over the agent's last tool result (errors, failing tests,
 repeated actions). Useful as a baseline and when no decision-model key is available.
 ``none`` never answers (the router then uses its ``on_error`` tier).
@@ -252,6 +256,121 @@ class JevBackend(DecisionBackend):
                 "calibrated": self.calibration is not None, "max_state_tokens": self.max_state_tokens}
 
 
+class OpenAIBackend(DecisionBackend):
+    """Any OpenAI-compatible chat-completions server as the decision backend.
+
+    The state and the question are sent as a single chat message; the model answers with one of the
+    options, and the answer is mapped to a deterministic distribution (the chosen option gets ``0.9`` and the
+    rest split the remainder) - the same shape the System-One backends return. Works with any chat-completions
+    endpoint (vLLM, TGI, Ollama, a LiteLLM gateway, ...), so a single capable model can be both the worker LLM
+    and the decision model. ``enable_thinking`` (a Qwen3 / reasoning-model switch) is forwarded to the call as
+    ``chat_template_kwargs: {enable_thinking: ...}`` only when set, so it stays absent by default and the
+    request is unchanged for non-reasoning servers. Like the other backends, failures raise (the router then
+    falls back to its ``on_error`` tier); an empty answer (a reasoning overrun) is retried, then fails open.
+    """
+
+    name = "openai"
+
+    def __init__(self, model: str | None = None, base_url: str | None = None, key_env: str | None = None,
+                 api_key: str | None = None, timeout_s: float = 30.0, retries: int = 2,
+                 max_tokens: int = 16, temperature: float = 0.0,
+                 enable_thinking: bool | None = None) -> None:
+        if not model:
+            raise ValueError("openai backend: model is required")
+        self.model = model
+        self.base_url = (base_url or "http://localhost:8000/v1").rstrip("/")
+        self.key_env = key_env
+        self._api_key = api_key
+        self.timeout_s = float(timeout_s)
+        self.retries = int(retries)
+        self.max_tokens = int(max_tokens)
+        self.temperature = float(temperature)
+        self.enable_thinking = enable_thinking
+        self._session: ClientSession | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None  # a session bound to a closed loop must not be reused
+
+    def _key(self) -> str:
+        return self._api_key or (os.environ.get(self.key_env, "") if self.key_env else "")
+
+    async def _client(self) -> ClientSession:
+        loop = asyncio.get_running_loop()
+        if self._session is None or self._session.closed or self._loop is not loop:
+            if self._session is not None and not self._session.closed:
+                await self._session.close()
+            self._session = ClientSession(timeout=ClientTimeout(total=self.timeout_s), trust_env=True)
+            self._loop = loop
+        return self._session
+
+    @staticmethod
+    def _prompt(q: "Question", state: str) -> str:
+        return (q.text + "\n\n" + state
+                + "\n\nRespond with exactly one word: " + " or ".join(f'"{o}"' for o in q.options) + ".")
+
+    @staticmethod
+    def _choice(ans: str, options: list[str]) -> str:
+        a = ans.strip().lower()
+        for o in options:  # exact match first
+            if o.lower() == a:
+                return o
+        for o in options:  # then a contained option (the model sometimes adds a short qualifier)
+            if o.lower() in a:
+                return o
+        raise RuntimeError(f"no option in the answer: {ans!r}")
+
+    def _parse(self, ans: str, q: "Question", latency: float, state: str | None = None) -> Decision:
+        choice = self._choice(ans, q.options)
+        n = len(q.options)
+        rest = 0.1 if n > 1 else 0.0  # chosen 0.9, the rest split 0.1 (matches the 2-option S0 encoding)
+        p = {o: (1.0 - rest if o == choice else rest / (n - 1)) for o in q.options}
+        # state kept for log_decision_state (like JevBackend): with a configured action_question_prefix it
+        # is the exact prompt sent, so the decision row is a complete record of the domain-framed question
+        return Decision(p=p, model=self.model, cost_usd=0.0, latency_s=latency, state=state)
+
+    async def decide(self, state: str, q: "Question") -> Decision:
+        body = {"model": self.model, "messages": [{"role": "user", "content": self._prompt(q, state)}],
+                "max_tokens": self.max_tokens, "temperature": self.temperature}
+        if self.enable_thinking is not None:  # forward the reasoning switch only when set (off by default)
+            body["chat_template_kwargs"] = {"enable_thinking": self.enable_thinking}
+        headers = {"Content-Type": "application/json"}
+        if self._key():
+            headers["Authorization"] = f"Bearer {self._key()}"
+        delay = 0.4
+        last = ""
+        for attempt in range(self.retries + 1):
+            retry = False
+            t0 = time.monotonic()
+            try:
+                cl = await self._client()
+                async with cl.post(f"{self.base_url}/chat/completions", data=json.dumps(body),
+                                   headers=headers) as r:
+                    text = await r.text()
+                    if r.status == 200:
+                        data = json.loads(text)
+                        ans = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                        if ans.strip():
+                            return self._parse(ans, q, time.monotonic() - t0, state)
+                        last, retry = "empty answer (a reasoning overrun?)", True
+                    elif r.status in RETRY_STATUS:
+                        last, retry = f"HTTP {r.status}: {text[:200]}", True
+                    else:
+                        last = f"HTTP {r.status}: {text[:200]}"  # not retriable (e.g. a 400)
+            except (asyncio.TimeoutError, OSError, ValueError) as e:
+                last, retry = f"{type(e).__name__}: {e}", True
+            if not retry or attempt == self.retries:
+                break
+            await asyncio.sleep(delay)
+            delay *= 2
+        raise RuntimeError(f"decision model failed: {last}")
+
+    async def close(self) -> None:
+        if self._session is not None:
+            await self._session.close()
+
+    def describe(self) -> dict[str, Any]:
+        return {"backend": self.name, "model": self.model, "base_url": self.base_url,
+                "enable_thinking": self.enable_thinking}
+
+
 # ------------------------------------------------------------------------------------------------ rules (no model)
 ERROR_PATTERNS = [
     r"Traceback \(most recent call last\)", r"\b[A-Z][A-Za-z]*Error\b", r"\berror:", r"\bERROR\b", r"\bFAILED\b",
@@ -327,6 +446,13 @@ def make_backend(spec: Mapping[str, Any] | None) -> DecisionBackend:
         if unknown:
             raise ValueError(f"unknown decision backend options {sorted(unknown)}; allowed: {sorted(allowed)}")
         return JevBackend(**spec)
+    if kind == "openai":
+        allowed = {"model", "base_url", "key_env", "api_key", "timeout_s", "retries",
+                   "max_tokens", "temperature", "enable_thinking"}
+        unknown = set(spec) - allowed
+        if unknown:
+            raise ValueError(f"unknown decision backend options {sorted(unknown)}; allowed: {sorted(allowed)}")
+        return OpenAIBackend(**spec)
     if kind == "rules":
         allowed = {"hard_option", "easy_option"}
         unknown = set(spec) - allowed
@@ -337,4 +463,4 @@ def make_backend(spec: Mapping[str, Any] | None) -> DecisionBackend:
         if spec:
             raise ValueError(f"the none backend takes no options (got {sorted(spec)})")
         return NoneBackend()
-    raise ValueError(f"unknown decision backend {kind!r} (jev | rules | none)")
+    raise ValueError(f"unknown decision backend {kind!r} (jev | openai | rules | none)")

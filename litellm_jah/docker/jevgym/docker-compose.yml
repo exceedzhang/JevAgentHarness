@@ -1,0 +1,76 @@
+# litellm-jah deployed SIDE-BY-SIDE with the existing :8000 -> :4000 stack, on host port 4001.
+#
+# This variant runs the JevGym / customer-support force-field: the 27B (vllm-openai-0, on the existing
+# `ubuntu_default` network) is BOTH the worker (jah-strong + jah-fast) and the action decision model, and
+# the two S0-validated adaptations (a customer-support domain framing + enable_thinking: false) are
+# CONFIG-DRIVEN fields in jah-config.yaml, so the stock litellm_jah behaviour is unchanged when they are
+# unset. See ./jah-config.yaml and ./litellm_config.yaml.
+#
+#   cd litellm_jah/docker/jevgym
+#   LITELLM_MASTER_KEY=sk-... DECISION_API_KEY=sk-1234 JAH_DEBUG=1 \
+#     docker compose up -d --build
+#
+# Non-disruptive: the only shared resource is the EXISTING `ubuntu_default` network, joined read-only to
+# reach vllm-openai-0 by name (http://vllm-openai-0:8000/v1). Joining an external network does not
+# reconfigure or restart anything in the existing stack; the existing litellm on :4000 and the gateway on
+# :8000 are untouched. This project gets its own name (`litellm-jah-jevgym`) and its own redis + log dir.
+
+services:
+  jah-redis:
+    image: redis:7
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - internal
+
+  litellm-jah:
+    build:
+      # the Dockerfile copies litellm_jah/, so the build context is the repository root (three levels up
+      # from this file: jevgym -> docker -> litellm_jah -> repo root)
+      context: ../../..
+      dockerfile: litellm_jah/Dockerfile
+    image: litellm-jah:latest
+    restart: unless-stopped
+    ports:
+      # the container listens on 4000 (the stock port); it is published on host 4001 so it is side-by-side
+      # with the existing stack's litellm, which keeps host :4000
+      - "4001:4000"
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
+      # the 27B is self-hosted on this host; DECISION_API_KEY is its bearer key (sk-1234). The same key
+      # authenticates the worker tiers (litellm_config api_key) and the decision backend (jah-config key_env)
+      DECISION_API_KEY: ${DECISION_API_KEY:-sk-1234}
+      # clamp a client max_tokens above the model's max output (see model_info in litellm_config.yaml)
+      LITELLM_MODIFY_PARAMS: "true"
+      # set JAH_DEBUG=1 to trace the hooks' internal paths (incl. the action guard's decision) in the logs
+      JAH_DEBUG: ${JAH_DEBUG:-}
+    volumes:
+      # step/decision journals, kept on the host on a SEPARATE dir from the stock stack (no clash)
+      - ${JAH_LOG_DIR:-$HOME/.jah/litellm-logs-4001}:/root/.jah/litellm-logs
+      - ./jah-config.yaml:/app/jah-config.yaml:ro
+      - ./litellm_config.yaml:/app/litellm_config.yaml:ro
+    command: --config /app/litellm_config.yaml
+    depends_on:
+      jah-redis:
+        condition: service_healthy
+    networks:
+      - internal          # jah-redis session store <-> litellm-jah
+      - vllm              # reach the 27B (vllm-openai-0:8000/v1) on the existing stack's network
+
+# the explicit name keeps this stack's containers/networks apart from the existing "ubuntu" project
+name: litellm-jah-jevgym
+
+networks:
+  # this project's own network: the jah-redis session store
+  internal:
+    driver: bridge
+  # the EXISTING stack's network, joined to reach the 27B by name. Read-only for it: joining does not
+  # reconfigure the existing containers. If that name differs on your host, set `name:` to the network
+  # that vllm-openai-0 lives on (or point jah-config at the network's gateway / host.docker.internal).
+  vllm:
+    external: true
+    name: ubuntu_default

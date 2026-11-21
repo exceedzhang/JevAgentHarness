@@ -328,8 +328,13 @@ class JahPostCall(CustomLogger):
         cands = flt.candidates(resp_tool_calls(resp))[:MAX_ACTION_ASKS]
         if not cands:
             return None
+        # a configured domain framing anchors the generic "irreversible action" question to a specific
+        # domain (set in the config, not the code): prepended to the action question only, so the other
+        # decision points are untouched. Off (no prefix) when unset, so the stock question is unchanged.
+        framing = (self.engine.cfg.action_question_prefix + "\n\n") \
+            if self.engine.cfg.action_question_prefix else ""
         asks = list(await asyncio.gather(*[self.engine.asker.ask(
-            "action", c.mode, f"{state}\n\nPROPOSED ACTION: {call_text(x, CHARS_PROPOSAL)}", ACTION,
+            "action", c.mode, framing + f"{state}\n\nPROPOSED ACTION: {call_text(x, CHARS_PROPOSAL)}", ACTION,
             self.engine.cfg.decision_timeout_s, c.tau, "risky", replace(view, risky=flt.is_risky(x)))
             for x in cands]))
         flagged: list[Any] = []

@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from litellm_jah.backend import Decision
+from litellm_jah.backend import Decision, DecisionBackend
 from litellm_jah.config import JAHCfg
 from litellm_jah.context import in_check
 from litellm_jah.engine import JAHRouter
@@ -363,6 +363,71 @@ def test_a_risky_redo_gets_one_more_look(run):
             assert rows[0]["recheck"] == "changed" and rows[0]["recheck_risky"] is False
             assert sess.step_points[2]["n_asks"] == 2
             await engine.close()
+
+    run(main())
+
+
+def _recording_action_backend():
+    """A decision backend that records the state string it receives for the action question."""
+
+    class Rec(DecisionBackend):
+        name = "rec"
+
+        def __init__(self):
+            self.action_state = None
+
+        async def decide(self, state, q, view=None):
+            if q.id == "action_risk":
+                self.action_state = state
+            return Decision(p=p_over(list(q.options), "risky", 0.9) if q.id == "action_risk"
+                            else {"routine": 0.8, "hard": 0.2})
+
+    return Rec()
+
+
+def test_action_question_prefix_is_prepended_to_the_action_question(run):
+    from litellm_jah.state import render_state
+
+    async def main():
+        rec = _recording_action_backend()
+        cfg = JAHCfg(mode="off", decision={"type": "none"}, strong="g-strong",
+                     decisions={"action": {"mode": "guard", "prefilter": "all"}},
+                     action_question_prefix="This is a customer-support task.")
+        engine = JAHRouter(cfg, backend=rec)
+        m = [
+            {"role": "user", "content": "I think I already gave you everything I have."},
+            {"role": "tool", "content": "Customer: No further info on my end."},
+        ]
+        state, view = render_state(m)
+        await hook(engine)._action_check(resp(tool_calls=[tool("ship_order", '{"order_id": "ORD-1"}')]),
+                                         "fast", state, view, m)
+        assert rec.action_state is not None
+        assert rec.action_state.startswith("This is a customer-support task.\n\n")  # the prefix is prepended
+        assert "PROPOSED ACTION: ship_order(" in rec.action_state  # the rest of the question is intact
+        await engine.close()
+
+    run(main())
+
+
+def test_action_question_prefix_is_absent_by_default(run):
+    from litellm_jah.state import render_state
+
+    async def main():
+        rec = _recording_action_backend()
+        cfg = JAHCfg(mode="off", decision={"type": "none"}, strong="g-strong",
+                     decisions={"action": {"mode": "guard", "prefilter": "all"}})
+        engine = JAHRouter(cfg, backend=rec)
+        m = [
+            {"role": "user", "content": "I think I already gave you everything I have."},
+            {"role": "tool", "content": "Customer: No further info on my end."},
+        ]
+        state, view = render_state(m)
+        await hook(engine)._action_check(resp(tool_calls=[tool("ship_order", '{"order_id": "ORD-1"}')]),
+                                         "fast", state, view, m)
+        assert rec.action_state is not None
+        assert "customer-support" not in rec.action_state  # no prefix by default: the stock question is unchanged
+        assert "PROPOSED ACTION: ship_order(" in rec.action_state
+        await engine.close()
 
     run(main())
 

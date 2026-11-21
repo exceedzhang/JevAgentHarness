@@ -10,6 +10,21 @@ def test_defaults():
     c = JAHCfg()
     assert c.tau == 0.75 and c.first_steps_strong == 1 and c.mode == "cascade" and c.on_error == "strong"
     assert c.strong_label == "COMPLEX" and c.fast_label == "SIMPLE"
+    assert c.action_question_prefix is None  # the domain framing is off by default (stock behaviour unchanged)
+
+
+def test_action_question_prefix_defaults_none_and_accepts_a_string():
+    assert JAHCfg().action_question_prefix is None
+    c = JAHCfg.from_dict({"action_question_prefix": "This is a customer-support task."})
+    assert c.action_question_prefix == "This is a customer-support task."
+    # an explicit null is also accepted (and stays None)
+    assert JAHCfg.from_dict({"action_question_prefix": None}).action_question_prefix is None
+
+
+@pytest.mark.parametrize("bad", [0, "", "   ", ["x"], {"a": 1}])
+def test_action_question_prefix_rejects_non_string_or_blank(bad):
+    with pytest.raises(ValueError, match="action_question_prefix"):
+        JAHCfg.from_dict({"action_question_prefix": bad})
 
 
 def test_router_block_compatibility():

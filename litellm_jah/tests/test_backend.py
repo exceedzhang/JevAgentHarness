@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from litellm_jah.backend import JevBackend, Question, RulesBackend, StepView
+from litellm_jah.backend import JevBackend, OpenAIBackend, Question, RulesBackend, StepView
 from litellm_jah.state import QUESTION
 
 
@@ -269,3 +269,133 @@ def test_make_backend_passes_the_calibration():
 
 def test_describe_without_calibration_is_not_calibrated():
     assert JevBackend().describe()["calibrated"] is False
+
+
+# ---------------------------------------------------------------------------------------------- openai (chat-completions)
+def test_openai_backend_prompt_layout():
+    q = Question(id="action_risk", text="Is it risky?", options=["safe", "risky"])
+    assert OpenAIBackend._prompt(q, "STATE") == \
+        'Is it risky?\n\nSTATE\n\nRespond with exactly one word: "safe" or "risky".'
+
+
+def test_openai_backend_choice_parsing():
+    assert OpenAIBackend._choice("risky", ["safe", "risky"]) == "risky"
+    assert OpenAIBackend._choice("Risky", ["safe", "risky"]) == "risky"        # case-insensitive
+    assert OpenAIBackend._choice("i think it is risky", ["safe", "risky"]) == "risky"  # contained
+    assert OpenAIBackend._choice("  safe  ", ["safe", "risky"]) == "safe"       # stripped
+    assert OpenAIBackend._choice("a", ["a", "b", "c"]) == "a"
+    with pytest.raises(RuntimeError):
+        OpenAIBackend._choice("banana", ["safe", "risky"])
+
+
+def test_openai_backend_enable_thinking_threading(run):
+    seen: list[dict] = []
+
+    async def handle(request: web.Request) -> web.Response:
+        seen.append(await request.json())
+        return web.json_response({"choices": [{"message": {"content": "safe"}}]})
+
+    async def go():
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", handle)
+        server = TestServer(app)
+        await server.start_server()
+        base = str(server.make_url("/v1"))  # the OpenAI-compatible root, like http://host:8000/v1
+        q = Question(id="action_risk", text="t", options=["safe", "risky"])
+        be = OpenAIBackend(model="m", base_url=base, retries=0)            # enable_thinking unset
+        be2 = OpenAIBackend(model="m", base_url=base, retries=0, enable_thinking=False)
+        try:
+            await be.decide("S", q)
+            assert "chat_template_kwargs" not in seen[-1]  # absent when unset: the stock request is unchanged
+            await be2.decide("S", q)
+            assert seen[-1]["chat_template_kwargs"] == {"enable_thinking": False}  # forwarded only when set
+        finally:
+            await be.close()
+            await be2.close()
+            await server.close()
+    run(go())
+
+
+def test_openai_backend_decide_maps_answer_to_probability(run):
+    async def handle(request: web.Request) -> web.Response:
+        return web.json_response({"choices": [{"message": {"content": "risky"}}]})
+
+    async def go():
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", handle)
+        server = TestServer(app)
+        await server.start_server()
+        q = Question(id="action_risk", text="t", options=["safe", "risky"])
+        be = OpenAIBackend(model="Qwen/Qwen3.8-27B", base_url=str(server.make_url("/v1")), retries=0)
+        try:
+            d = await be.decide("S", q)
+            assert d.p == {"risky": 0.9, "safe": 0.1} and d.model == "Qwen/Qwen3.8-27B" and d.cost_usd == 0.0
+        finally:
+            await be.close()
+            await server.close()
+    run(go())
+
+
+def test_openai_backend_retries_an_empty_answer_then_succeeds(run):
+    calls: list[int] = []
+
+    async def handle(request: web.Request) -> web.Response:
+        calls.append(1)
+        # the first answer is empty (a reasoning overrun); the retry returns a real answer
+        return web.json_response({"choices": [{"message": {"content": "" if len(calls) == 1 else "safe"}}]})
+
+    async def go():
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", handle)
+        server = TestServer(app)
+        await server.start_server()
+        q = Question(id="action_risk", text="t", options=["safe", "risky"])
+        be = OpenAIBackend(model="m", base_url=str(server.make_url("/v1")), retries=2)
+        try:
+            d = await be.decide("S", q)
+            assert d.p["safe"] == 0.9 and len(calls) == 2  # the empty answer was retried once
+        finally:
+            await be.close()
+            await server.close()
+    run(go())
+
+
+def test_openai_backend_spreads_the_remainder_over_more_than_two_options():
+    # a 3-option question: chosen 0.9, the rest split 0.1
+    q = Question(id="next_tool", text="t", options=["a", "b", "c"])
+    d = OpenAIBackend(model="m")._parse("b", q, 0.0)
+    assert d.p["b"] == 0.9 and d.p["a"] == 0.05 and d.p["c"] == 0.05 and sum(d.p.values()) == pytest.approx(1.0)
+
+
+def test_openai_backend_captures_the_state_for_log_decision_state(run):
+    # with log_decision_state on, the decision row carries the exact prompt sent (incl. any action prefix)
+    async def handle(request: web.Request) -> web.Response:
+        return web.json_response({"choices": [{"message": {"content": "risky"}}]})
+
+    async def go():
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", handle)
+        server = TestServer(app)
+        await server.start_server()
+        q = Question(id="action_risk", text="t", options=["safe", "risky"])
+        be = OpenAIBackend(model="m", base_url=str(server.make_url("/v1")), retries=0)
+        try:
+            d = await be.decide("THE STATE", q)
+            assert d.state == "THE STATE"  # the exact state string sent is kept for the decision row
+        finally:
+            await be.close()
+            await server.close()
+    run(go())
+
+
+def test_make_backend_constructs_openai():
+    from litellm_jah.backend import make_backend
+
+    be = make_backend({"type": "openai", "model": "Qwen/Qwen3.8-27B", "base_url": "http://x:8000/v1",
+                       "key_env": "DECISION_API_KEY", "enable_thinking": False})
+    assert isinstance(be, OpenAIBackend)
+    assert be.model == "Qwen/Qwen3.8-27B" and be.enable_thinking is False and be.key_env == "DECISION_API_KEY"
+    with pytest.raises(ValueError):
+        make_backend({"type": "openai", "model": "m", "bogus": 1})  # unknown option
+    with pytest.raises(ValueError):
+        make_backend({"type": "openai"})  # model is required

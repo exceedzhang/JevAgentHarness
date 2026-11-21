@@ -62,6 +62,13 @@ DEFAULTS: dict[str, Any] = {
     # per-model prices for the step log's cost column: {model: {input, output, cached_input[, cache_write]}}
     # in the billing currency per million tokens (the engine registers them into litellm's cost map)
     "prices": None,
+    # a domain framing prepended to the action guard's question: the generic "irreversible action" question
+    # is written for general (coding) agents, where a dangerous call is `rm -rf` / `git push --force`. In a
+    # domain like customer support the irreversible actions are business operations (ship / refund / cancel)
+    # that a general model reads as ordinary, so a domain framing (set in the config, not the code) anchors
+    # the question's own "irreversible business operation = risky" intent to that domain. Off by default
+    # (None = no prefix), so the stock behaviour is unchanged when it is unset.
+    "action_question_prefix": None,
 }
 
 
@@ -93,6 +100,7 @@ class JAHCfg:
     preset: str | None = None
     decisions: dict[str, Any] | None = None
     prices: dict[str, Any] | None = None # per-model prices (currency per million tokens) for the cost column
+    action_question_prefix: str | None = None # domain framing prepended to the action question (None = none)
 
     @property
     def points(self) -> Decisions:
@@ -146,6 +154,9 @@ class JAHCfg:
             raise ValueError("log_decision_state must be a boolean")
         if c.prices is not None and (not isinstance(c.prices, Mapping) or not c.prices):
             raise ValueError("prices must be a non-empty mapping of model -> {input, output, ...}")
+        if c.action_question_prefix is not None and (not isinstance(c.action_question_prefix, str)
+                                                     or not c.action_question_prefix.strip()):
+            raise ValueError("action_question_prefix must be a non-empty string or null")
         for m, spec in (c.prices or {}).items():
             if not isinstance(spec, Mapping) or "input" not in spec or "output" not in spec:
                 raise ValueError(f"prices[{m!r}]: expected a mapping with at least 'input' and 'output'")
