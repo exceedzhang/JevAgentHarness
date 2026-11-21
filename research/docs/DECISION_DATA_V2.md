@@ -771,3 +771,30 @@ arms:
 
 **交付物**：`litellm_jah/litellm_jah/{backend,config,postcall}.py`（2 配置字段 + OpenAIBackend）+ `litellm_jah/tests/`（3 个测试文件，262 通过）+ `litellm_jah/docker/jevgym/`（3 个配置）+ 服务器已构建运行 `litellm-jah:latest`（:4001）。
 
+---
+
+### 13.21 S1 灰度切流步骤（把 27B-worker 流量逐步路由到 :4001）
+
+**目标**：按 §13.18.4 把生产 27B-worker 调用从 `:8000`（直连 27B）逐步路由到 `:4001`（litellm_jah，带 force-field 门），用 §13.17 的指标门控每阶段，验证门在真实流量上降低有害方向错误（假完成/抢答）且无回退。
+
+**诚实前提**：本环境没有独立的"生产流量"——生产 27B-worker 调用就是 agents 经 `:8000`（nginx→litellm:4000→vllm）发起的。所以"S1 灰度" = 把其中一小部分 27B-worker 调用改走 `:4001`（litellm_jah，同样路由到 27B，但多了 action-guard force-field）。**收益 = force-field 门减少有害方向错误**（§13.12 假完成 / §13.15 抢答），不是提升 27B 本身。
+
+**1. 路由方式（两种，推荐 A 起步）**
+- **A. 客户端金丝雀（推荐起步，最可控/易回滚）**：把一小撮 agent worker（如 10 副本里的 1 个，或一个 canary env/team）的 LLM `base_url` 从 `http://140.210.143.61:8000` 改为 `http://140.210.143.61:4001`、`api_key` 改为 :4001 的持久 master key。其余 90% 保持 :8000。回滚 = 把 canary 的 base_url 翻回 :8000（秒级）。
+- **B. 网关加权路由（规模化替代）**：在 `:8000` nginx 加 `:4001` 为第二 upstream，加权（10%→:4001 / 90%→:4000）。无需客户端改动，但要改 nginx + :4001 须服务相同模型名（现 `jah-auto/jah-strong/jah-fast`）。
+
+**2. 金丝雀配置**：:4001 已带测过的 force-field 配置（action `guard/all/tau 0.3` + domain framing + `enable_thinking:false`，§13.20 的 jevgym 配置）。S1 直接用，不改。
+
+**3. 每阶段验收门（§13.17 `select_tool_acceptance.py`）**：收集 canary（:4001）+ 对照（:8000）trace → `select_tool_acceptance.py <canary.jsonl> --baseline <base.jsonl> --min-gain 0.05`。**PASS = 成功率 ≥ 基线+0.05 且 有害方向错误率 ≤ 基线**；PASS 升档，FAIL（有害↑ 或 成功↓）回滚。三档指标（§13.17）：在环成功率 / 有害方向错误率（假完成/抢答/不可逆）/ 有效性。
+
+**4. 灰度阶梯（§13.18.4）**：S1 5–10% → S2 25–50% → S3 100%。每档跑一个够样本判 ±5pp 显著性的稳定窗口，过门才升档。
+
+**5. 回滚（任一触发 → 撤 :4001 流量）**
+- 最快：canary 的 base_url 翻回 :8000（A）；或 nginx 把 :4001 权重清零（B）。
+- **门级**：把 :4001 的 action 门 `mode: off`（:4001 变直通，仍是 27B 但无门）——保留路由、只关门，便于区分"路由问题"vs"门问题"。
+- **容器级**：`sudo docker compose -p litellm-jah-jevgym -f /data1/apps/JevAgentHarness/litellm_jah/docker/jevgym/docker-compose.yml down`（:8000 路径独立，不受影响）。
+
+**6. 监控（S1 期间）**：litellm_jah 的 `/logs` volume（`decisions.jsonl`/`requests.jsonl`/`traces.jsonl`，已挂服务器 `litellm_jah/logs/`）+ 门触发标记 + 延迟 + 27B 用量；`JAH_DEBUG=1` 开详细日志。
+
+**7. 上线前 checklist**：✅ :4001 部署+验证（§13.20）；✅ 持久 master key（§13.20 注 + 本次）；✅ force-field 离线 S0 在环 298/300（§13.19）；⬜ S1 5–10% 金丝雀 + §13.17 验收门。
+
