@@ -25,6 +25,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from . import scoring
 from .data import read_jsonl
 
 
@@ -42,10 +43,18 @@ def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     flips = [r["flip"] for r in rows if r.get("flip") is not None]
     if flips:
         out["flip_rate"] = sum(flips) / len(flips)
+    # Asymmetric validity (§13.12): acceptable = match OR forgiven reply_to_tool; the four quadrant
+    # shares make the reply<->tool asymmetry visible. Sits alongside `acc` (label-match) without replacing it.
+    n = len(rows)
+    quads = [r["quad"] for r in rows]
+    out["asym_valid"] = sum(r["acceptable"] for r in rows) / n
+    for qn in ("match", "reply_to_tool", "tool_to_reply", "other"):
+        out[f"quad_{qn}"] = sum(1 for q in quads if q == qn) / n
     return {k: ((round(v, 5) if math.isfinite(v) else None) if isinstance(v, float) else v) for k, v in out.items()}
 
 
-def evaluate(engine: Any, examples: list[dict[str, Any]], n_perm: int = 1, seed: int = 0) -> dict[str, Any]:
+def evaluate(engine: Any, examples: list[dict[str, Any]], n_perm: int = 1, seed: int = 0,
+             judge_fn: Any = None) -> dict[str, Any]:
     """Score ``examples`` (training format) with ``engine`` (a ``serve_jev.Engine``). Returns overall / by_dp /
     by_kind metrics (see the module docstring)."""
     rng = random.Random(seed)
@@ -62,6 +71,7 @@ def evaluate(engine: Any, examples: list[dict[str, Any]], n_perm: int = 1, seed:
         for i, (p, order) in enumerate(zip(pp, orders)):
             perm_pred[i].append(order[max(range(len(p)), key=lambda j: p[j])])
     rows = []
+    judge_results: list[dict[str, Any]] = []
     for i, (e, p) in enumerate(zip(ex, probs)):
         q = [float(e["target"].get(o, 0.0)) for o in e["options"]]
         z = sum(q) or 1.0
@@ -72,7 +82,15 @@ def evaluate(engine: Any, examples: list[dict[str, Any]], n_perm: int = 1, seed:
         rows.append({"dp": str(e.get("dp")), "kind": str(e.get("kind", "choice")),
                      "gold": str(e["options"][gold]), "pred": str(e["options"][pred]),
                      "conf": float(p[pred]), "correct": pred == gold, "nll": nll,
+                     "quad": scoring.quadrant(e["options"][gold], e["options"][pred]),
+                     "acceptable": scoring.acceptable(e["options"][gold], e["options"][pred]),
                      "flip": (sum(x != pred for x in perm_pred[i]) / n_perm) if n_perm else None})
+        if judge_fn is not None and rows[-1]["quad"] in ("reply_to_tool", "tool_to_reply"):
+            jr = judge_fn({"state": e.get("state", ""),
+                           "opts": [scoring.option_name(o) for o in e["options"]],
+                           "pred": scoring.option_name(e["options"][pred])})
+            jr["direction"] = rows[-1]["quad"]
+            judge_results.append(jr)
     by_dp: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_kind: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_tool: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -82,11 +100,15 @@ def evaluate(engine: Any, examples: list[dict[str, Any]], n_perm: int = 1, seed:
         by_kind[r["kind"]].append(r)
         by_tool[r["gold"]].append(r)
         confusion[r["gold"]][r["pred"]] += 1
-    return {"overall": _metrics(rows), "by_dp": {k: _metrics(v) for k, v in sorted(by_dp.items())},
-            "by_kind": {k: _metrics(v) for k, v in sorted(by_kind.items())},
-            "by_tool": {k: _metrics(v) for k, v in sorted(by_tool.items())},
-            "confusion": {g: dict(sorted(p.items())) for g, p in sorted(confusion.items())},
-            "seconds": round(secs, 2), "decisions_per_s": round(len(rows) / secs, 2) if secs > 0 else None}
+    out = {"overall": _metrics(rows), "by_dp": {k: _metrics(v) for k, v in sorted(by_dp.items())},
+           "by_kind": {k: _metrics(v) for k, v in sorted(by_kind.items())},
+           "by_tool": {k: _metrics(v) for k, v in sorted(by_tool.items())},
+           "confusion": {g: dict(sorted(p.items())) for g, p in sorted(confusion.items())},
+           "seconds": round(secs, 2), "decisions_per_s": round(len(rows) / secs, 2) if secs > 0 else None}
+    if judge_fn is not None and judge_results:
+        from .judge import summarize
+        out["judge"] = summarize(judge_results)
+    return out
 
 
 def main(argv: list[str] | None = None) -> dict[str, Any]:
@@ -101,15 +123,23 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None, help="JSON output (default: print only)")
+    ap.add_argument("--judge", action="store_true", help="run the 27B validity judge on reply<->tool boundary cases")
+    ap.add_argument("--judge-api", default="http://127.0.0.1:8000/v1/chat/completions")
+    ap.add_argument("--judge-model", default="Qwen/Qwen3.8-27B")
+    ap.add_argument("--judge-key", default="sk-1234")
     a = ap.parse_args(argv)
     from .serve_jev import Engine
 
     eng = Engine(a.model, a.adapter or None, a.calibration, name="eval", max_len=a.max_len, batch_size=a.batch_size)
     res: dict[str, Any] = {"model": a.model, "adapter": a.adapter or None, "calibration": a.calibration,
                            "n_perm": a.n_perm, "files": {}}
+    judge_fn = None
+    if a.judge:
+        from . import judge as _judge
+        judge_fn = lambda case: _judge.judge_case(case, api=a.judge_api, model=a.judge_model, key=a.judge_key)
     for f in a.dev:
         ex = read_jsonl(f)[: a.limit] if a.limit else read_jsonl(f)
-        res["files"][f] = evaluate(eng, ex, a.n_perm, a.seed)
+        res["files"][f] = evaluate(eng, ex, a.n_perm, a.seed, judge_fn=judge_fn)
         print(json.dumps({f: res["files"][f]["overall"]}), flush=True)
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)

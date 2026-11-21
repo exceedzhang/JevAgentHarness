@@ -481,6 +481,8 @@ n≥13 的净对错加总 = **−10+10−3−1−1+1+1+1+1+3+2 = +4**，正好�
 
 **复现**：`data/train_v4/dev.jsonl`；v8 = `checkpoints/grpo_train_v8`；判官 27B = vllm :8000（`sk-1234`）。脚本 `/tmp/extract_boundary.py` / `/tmp/judge_boundary.py`（可迁入 `research/src/jevharness/training/` 作为 `boundary_validity.py`）。
 
+**已落地（11-21）**：本节「判有效性不判标签匹配 + 非对称」已实现为可复用代码——`training/scoring.py`（四象限 `quadrant` / `asymmetric_validity` / `acceptable` / `reply_asym_reward`，单源真值）、`training/eval_decisions.py`（每组新增 `asym_valid` = (#match+#reply_to_tool)/n + 四个 `quad_*` 占比，并加 `--judge` 调 27B 判官）、`training/grpo_trl.py`（`reply_asym` 奖励，向后兼容）、`training/judge.py`（27B 判官移植，`boundary_judge.py` 的模块化）。参考文档 `research/docs/ASYMMETRIC_VALIDITY.md`。v8 下 `asym_valid` = (475+51)/842 = **62.5%**，夹在 label-match 56.4% 与判官上界 68.1% 之间。
+
 ### 13.13 执行层「假完成 / 抢答」检测器（在 v8 在环 trace 上，oracle-free）
 
 **动机**：§13.12 把 56% 天花板里**真实**的损失定位到「抢答 / 假完成」（63% 的 tool→reply 是 invalid），并指明它属执行层、非 GRPO 可修。本节在该方向上落地一个**可落地、oracle-free** 的在环检测器：当 agent 要把一个**从未被给出/确认**的值填进**不可逆**动作之前，拦下/提示它，而不是让它猜。

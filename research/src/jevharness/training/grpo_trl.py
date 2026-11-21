@@ -52,8 +52,9 @@ from typing import Any, Callable
 import torch
 
 from .data import SYSTEM, permuted, read_jsonl, render  # noqa: F401  (SYSTEM re-exported for docs)
+from .scoring import reply_asym_reward
 
-REWARDS = ("correct", "format", "soft", "qvalue", "reply_bound", "valid_alt")
+REWARDS = ("correct", "format", "soft", "qvalue", "reply_bound", "valid_alt", "reply_asym")
 
 
 # ------------------------------------------------------------------ data
@@ -169,7 +170,18 @@ def make_reward_funcs(tok: Any, names: list[str], strict_eos: bool = False) -> l
                 out.append(0.0)
         return out
 
-    table = {"correct": correct, "format": format_, "soft": soft, "qvalue": qvalue, "reply_bound": reply_bound}
+    def reply_asym(completion_ids: list[list[int]], n_options: list[int], gold: list[int],
+                   reply_idx: list[int], **_: Any) -> list[float]:
+        # Option 2 (asymmetric reply/tool, §13.12). The rule lives in scoring.reply_asym_reward
+        # (single source of truth, shared with the eval gate); here we only decode the picked index.
+        out: list[float] = []
+        for c, n, g, ri in zip(completion_ids, n_options, gold, reply_idx):
+            k = pick(c, n)
+            out.append(0.0 if k is None else reply_asym_reward(k, g, ri))
+        return out
+
+    table = {"correct": correct, "format": format_, "soft": soft, "qvalue": qvalue,
+             "reply_bound": reply_bound, "reply_asym": reply_asym}
     funcs = []
     for n in names:
         if n not in table:
@@ -226,6 +238,10 @@ def option_reward(names: list[str], weights: list[float], row: dict[str, Any], k
                     r += w * 0.1
                 else:
                     r += w * 0.05
+        elif n == "reply_asym":
+            # Option 2 (asymmetric reply/tool, §13.12). Single source of truth:
+            # scoring.reply_asym_reward (match +1.0 / tool_to_reply -1.0 / else 0.0).
+            r += w * reply_asym_reward(k, row["gold"], row.get("reply_idx", -1))
     return r
 
 
