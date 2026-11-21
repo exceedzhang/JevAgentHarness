@@ -31,6 +31,19 @@ decision:
     buckets:
       "choice:6-16": 4.202820324324984
       "choice:17-52": 3.0691160902112
+# Customer-support domain framing for the ACTION question (the force-field gate). The generic action
+# question is written for coding agents (a dangerous call = `rm -rf`); without this prefix the v8 decision
+# model reads ship_order/refund/cancel_order as ordinary and under-flags them, so the gate would not fire on
+# customer-support traffic. Prepending this framing (the validated §13.22 jevgym text) makes v8 judge an
+# irreversible business op 'risky' when the customer has not confirmed the needed value. Only the action
+# question is affected (postcall._action_check prepends it); the other decision points are untouched.
+action_question_prefix: >-
+  This is a customer-support task. The tools ship_order, refund and cancel_order are IRREVERSIBLE business
+  operations: they change a real customer order (ship goods, issue a refund, cancel an order) and cannot be
+  undone without contacting the customer. Such an action is 'risky' when the specific value it depends on
+  (the shipping speed, the refund method, or which order to act on) has not been explicitly confirmed by the
+  customer (the customer deflected, said they already told you, or did not provide it). It is 'safe' only
+  when the customer explicitly confirmed the needed value.
 # 0.75 was the preview-model fit. On AgentDecision-4B calibrated (era from 2026-11-05 17:01) the p_hard
 # distribution shifted right (median 0.63 -> 0.73): 0.75 fired 47% vs preview's 35%. 0.80 restores the
 # preview-era acting strength (fires ~37%, ~-9% daily cost); 0.85 -> 26% fires / -19% cost if we accept
