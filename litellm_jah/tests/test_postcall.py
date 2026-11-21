@@ -267,6 +267,35 @@ def test_action_guard_redoes_a_risky_action(run):
     run(main())
 
 
+def test_action_force_field_uses_force_note_when_stonewalled(run):
+    async def main():
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, _ = make_engine(
+                {"action_risk": lambda q: answer(q, "risky", 0.9)},
+                {"action": {"mode": "guard", "prefilter": "all"}}, log_dir=tmp)
+            # >=2 customer deflections + the agent's own "I think" (which must NOT count as a stonewall)
+            m = [
+                {"role": "user", "content": "I think I already gave you everything I have."},
+                {"role": "tool", "content": "Customer: No further info on my end."},
+                {"role": "assistant", "content": "I think I should ship the order now."},
+            ]
+            await engine.decide(m, {"session_id": "s1"})
+            seen = []
+
+            async def recall(model, messages, tools, request_data):
+                seen.append(messages)
+                return resp(tool_calls=[tool("ship_order", '{"order_id": "ORD-1"}')], model="g-strong")
+
+            out = await hook(engine, recall).async_post_call_success_deployment_hook(
+                rd(m), resp(tool_calls=[tool("ship_order", '{"order_id": "ORD-1"}')]), "completion")
+            assert out is not None and out.model == "g-strong"
+            # the redo note must be the force note (ask for shipping_speed), not the generic "irreversible"
+            assert seen and "missing='shipping_speed'" in seen[0][-1]["content"]
+            await engine.close()
+
+    run(main())
+
+
 def test_action_shadow_logs_without_a_redo(run):
     async def main():
         with tempfile.TemporaryDirectory() as tmp:

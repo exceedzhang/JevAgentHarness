@@ -386,10 +386,21 @@ def _msg_text(m: Any) -> str:
     return str(c) if c is not None else str(m)
 
 
+def _msg_role(m: Any) -> str | None:
+    """The message's role (user/tool = the customer; assistant/system = the agent), if it carries one."""
+    return m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+
+
 def _count_stonewalls(messages: list[Any]) -> int:
-    """How many messages in the history are short deflections the customer gave instead of the value."""
+    """How many of the CUSTOMER's messages in the history are short deflections instead of the value.
+
+    Only user/tool messages count (the customer's words and the ask_user result); the agent's own
+    assistant/system messages never do -- otherwise a short "I think …" from the agent would be
+    mistaken for a customer stonewall and fire the gate on a clean episode."""
     n = 0
     for m in messages:
+        if _msg_role(m) in ("assistant", "system", "developer"):
+            continue
         text = _msg_text(m)
         if text and len(text) < 150 and _GATE_STONEWALL_RE.search(text):
             n += 1

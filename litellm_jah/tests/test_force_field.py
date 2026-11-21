@@ -62,3 +62,15 @@ def test_force_ask_note_is_none_for_a_non_force_tool():
 
 def test_count_stonewalls_empty_history():
     assert _count_stonewalls([]) == 0
+
+
+def test_count_stonewalls_ignores_agent_and_system_messages():
+    # the agent's own "I think…" (assistant) and system messages are NOT customer deflections:
+    # only the customer's user/tool messages count
+    msgs = [
+        {"role": "assistant", "content": "I think I should ship ORD-1234 now."},
+        {"role": "system", "content": "That's all the information available on this order."},
+        {"role": "user", "content": "I think I already gave you everything."},
+        {"role": "tool", "content": "Customer: Nothing more to add."},
+    ]
+    assert _count_stonewalls(msgs) == 2
