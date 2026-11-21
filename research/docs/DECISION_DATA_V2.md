@@ -825,3 +825,43 @@ arms:
 
 **7. 上线前 checklist**：✅ :4001 部署+验证（§13.20）；✅ 持久 master key（§13.20 注 + 本次）；✅ force-field 离线 S0 在环 298/300（§13.19）；⬜ S1 5–10% 金丝雀 + §13.17 验收门。
 
+---
+
+### 13.23 litellm_jah 请求处理全流程（mermaid）
+
+一个经 :4001（litellm_jah 部署）的 chat 请求的完整生命周期：客户端请求 → **前置 precall**（路由 `mode: off` → 直通）→ **27B 模型调用** → **后置 postcall**（JAH 决策点并行检查，含 ACTION force-field 门，决策后端 = v8 jev）→ 命中门则**强档重跑**（带门 note，`in_check` 防递归）→ **settle** 记日志 → 返回。
+
+```mermaid
+flowchart TD
+    A["客户端（agent worker）"] -->|"POST /v1/chat/completions<br/>+ master-key 鉴权"| B[":4001 litellm 代理<br/>(litellm-jah-jevgym)"]
+    B --> C["JAH 前置 precall<br/>(routing mode=off → 直通)"]
+    C --> D["模型调用：27B<br/>(vllm-openai-0)"]
+    D --> E["JAH 后置 postcall<br/>JahPostCall._check()"]
+    E --> E1["stop 门 (shadow)"]
+    E --> E2["tool_select 门<br/>(v8 jev 决策)"]
+    E --> E3["routing 门 (off)"]
+    E --> E4["ACTION 门 (force-field)"]
+    E4 --> E4a["prefilter:all<br/>→ 每个工具调用做一次 v8 风险判定"]
+    E4a --> Q1{"有风险 (p≥τ=0.3)<br/>且 历史≥2 次客户石墙?"}
+    Q1 -->|是| N4["force_ask_note:<br/>改 ask_user(missing=推断字段)"]
+    Q1 -->|否| F{"任一门命中?"}
+    E1 --> F
+    E2 --> F
+    N4 --> F
+    F -->|否| G["settle()"]
+    F -->|是| R["强档重跑 (27B):<br/>带门 note 重新生成<br/>(in_check 标志防递归)"]
+    R --> Q2{"重跑后仍是有风险动作?"}
+    Q2 -->|是| R2["第二次重跑<br/>(one more look, 带新 note)"]
+    Q2 -->|否| G
+    R2 --> G
+    G --> G1["写 decisions.jsonl 一行<br/>+ 标注各 ask"]
+    G1 --> H["响应返回客户端"]
+```
+
+**关键点**：
+- **ACTION force-field 是核心**：`prefilter: all` 让每个工具调用都被 v8 判风险；仅当"有风险 **且** 客户已 ≥2 次石墙"才发 `force_ask_note`（强制改问推断字段 ship_order→shipping_speed / refund→refund_method / cancel→order_id）——这正是 §13.15/§13.19/§13.22 里 27B 遵循它、把 clarify 抢答/假完成救回 297–298/300 的机制。
+- **note+redo 而非直接改写**（litellm_jah 形态）：命中门时不直接改工具调用，而是把门 note 注入消息、让 27B（强档）重新生成；`in_check` 标志防重跑再次触发 postcall（防递归）；重跑后若仍有风险动作，"one more look" 再重跑一次。
+- **五个决策点**：`routing`（:4001 配 off，直通）/ `tool_select`（v8 guard，§13.22 里是 v8 做工具决策的关键）/ `stop`（shadow）/ `reflection` / `action`（force-field guard/all/τ0.3）。
+- **配置**（:4001 `jevgym/jah-config.yaml`）：`decision` = jev/v8（决策后端 @172.18.0.1:8000）、`decisions` = {action: guard/all/τ0.3, tool_select: guard, stop: shadow}、`strong` = 27B、`action_question_prefix` = 客户支持域框架、`enable_thinking: false`。
+- **日志**：`settle()` 每步写一行 `decisions.jsonl`（+ `requests.jsonl`/`traces.jsonl`）到 `/logs` volume，供 §13.17 验收 + `JAH_DEBUG=1` 调试。
+
