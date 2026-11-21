@@ -33,9 +33,11 @@ from .points import (
     STOP,
     STOP_REJECT_NOTE,
     Ask,
+    _count_stonewalls,
     action_note,
     call_text,
     ends_turn,
+    force_ask_note,
     llm_choice,
     pass_through,
     proposal_text,
@@ -169,7 +171,7 @@ class JahPostCall(CustomLogger):
         if dc.routing.mode == "guard" and rec["reason"] == "guard" and first_tier != "strong" and not redone:
             jobs.append(self._route_guard(response, dc.routing, first_tier, state, view))
         if dc.action.on and resp_tool_calls(response):
-            jobs.append(self._action_check(response, first_tier, state, view))
+            jobs.append(self._action_check(response, first_tier, state, view, messages))
         # Like the standalone proxy: run the checks concurrently and isolate a
         # failing one, so one bad check cannot starve the others or settle().
         verdicts: list[_Verdict] = []
@@ -319,7 +321,8 @@ class JahPostCall(CustomLogger):
         a.effect = "accepted"
         return _Verdict(False, "route_guard", asks=[a])
 
-    async def _action_check(self, resp: Any, tier: str, state: str, view: Any) -> _Verdict | None:
+    async def _action_check(self, resp: Any, tier: str, state: str, view: Any,
+                            messages: list[dict] | None = None) -> _Verdict | None:
         c = self.engine.points.action
         flt = self.engine.action_filter(c)
         cands = flt.candidates(resp_tool_calls(resp))[:MAX_ACTION_ASKS]
@@ -342,7 +345,19 @@ class JahPostCall(CustomLogger):
             else:
                 a.effect = "logged" if c.mode == "shadow" else "accepted"
         if flagged:
-            return _Verdict(True, "action_guard", action_note(flagged), asks)
+            note = action_note(flagged)
+            if messages:
+                # the force-field: the customer has kept deflecting (>=2 stonewalls) and the agent is about
+                # to guess a value into an irreversible action, so force the ask for the field that action
+                # needs instead of the generic second look.
+                n_sw = _count_stonewalls(messages)
+                if n_sw >= 2:
+                    for x in flagged:
+                        forced = force_ask_note(tc_name(x), n_sw)
+                        if forced:
+                            note = forced
+                            break
+            return _Verdict(True, "action_guard", note, asks)
         return _Verdict(False, "action_guard", asks=asks)
 
     # ------------------------------------------------------------------ the redo
@@ -384,7 +399,7 @@ class JahPostCall(CustomLogger):
         self._label_redo(redo, first_resp, resp, notes, sess)
         # the redo proposes a risky action: one more look (like the standalone proxy)
         if look and self.engine.points.action.on and "action_guard" not in reasons and resp_tool_calls(resp):
-            v2 = await self._action_check(resp, "strong", state, view)
+            v2 = await self._action_check(resp, "strong", state, view, messages)
             if v2 is not None and v2.redo:
                 resp2, lat2 = await self._rerun(cfg.strong, with_notes(messages, [v2.note] if v2.note else []),
                                                 tools, request_data)

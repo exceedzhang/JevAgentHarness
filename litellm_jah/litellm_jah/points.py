@@ -360,6 +360,55 @@ def action_note(calls: list[Any]) -> str:
                    f"make the same call again; if not, take a safer next step.")
 
 
+# the force-field remedy: when the agent is about to run an irreversible action after the customer keeps
+# deflecting (stonewalling) instead of giving the value, force a redo that asks for the field inferred from
+# that action, instead of the field the agent keeps guessing at.
+_GATE_STONEWALL_RE = re.compile(
+    r"already (?:gave|told|said)|i think|no (?:further )?info|nothing (?:more|else)|that's all|on my end|"
+    r"don't (?:have|see)", re.I)
+_FORCE_FIELD = {"ship_order": "shipping_speed", "refund": "refund_method", "cancel_order": "order_id"}
+_FORCE_FIELD_Q = {
+    "shipping_speed": "Could you confirm the exact shipping speed you want (e.g. standard or express)?",
+    "refund_method": "Could you confirm the refund method (e.g. original payment method or store credit)?",
+    "order_id": "Could you provide the order ID (e.g. ORD-1234)?",
+}
+
+
+def _msg_text(m: Any) -> str:
+    """The text content of one message: a plain string, the text parts of a list of content parts, or a
+    fallback string of the message when it has no content field."""
+    c = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+    if isinstance(c, list):
+        parts = []
+        for p in c:
+            parts.append(str(p.get("text", "")) if isinstance(p, dict) else str(p))
+        return " ".join(t for t in parts if t)
+    return str(c) if c is not None else str(m)
+
+
+def _count_stonewalls(messages: list[Any]) -> int:
+    """How many messages in the history are short deflections the customer gave instead of the value."""
+    n = 0
+    for m in messages:
+        text = _msg_text(m)
+        if text and len(text) < 150 and _GATE_STONEWALL_RE.search(text):
+            n += 1
+    return n
+
+
+def force_ask_note(tool: str, n_sw: int) -> str | None:
+    """A redo note that forces the agent to ask for the field ``tool`` needs, or None for a tool that is not
+    one of the force-field actions."""
+    if tool not in _FORCE_FIELD:
+        return None
+    field = _FORCE_FIELD[tool]
+    return (f"[Pre-action force-field] `{tool}` is an irreversible action and you have already asked the "
+            f"customer {n_sw} time(s) without obtaining the value (they keep deflecting). Do NOT call "
+            f"`{tool}`. Instead call `ask_user(missing='{field}', question='{_FORCE_FIELD_Q[field]}')` now to "
+            f"get the needed value. If you truly cannot obtain it, finish and report you cannot proceed "
+            f"without it.")
+
+
 def with_notes(messages: list[dict[str, Any]], notes: list[str]) -> list[dict[str, Any]]:
     """The messages with harness notes appended to the last message (a tool result or a user message), so the
     conversation keeps its shape on every API and a cached prefix stays a prefix."""
